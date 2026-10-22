@@ -1,95 +1,262 @@
--- [jjs] Jujutsu Shenanigans module.
--- The upstream script keeps its own Fluent window and its own keybinds; this
--- module only makes it part of the hub: globals are guarded, dependencies are
--- fetched from the hub mirrors, and the body runs inside one function so the
--- original main chunk keeps its 200-local headroom.
+-- [jjs] Jujutsu Shenanigans module, rebuilt on the hub's own interface.
+-- The upstream feature code is kept; the Fluent menu it used to ship is gone.
+-- Every control here is a hub element: tabs, sections, toggles, sliders,
+-- dropdowns, buttons, paragraphs, textboxes and keybinds.
 if type(Services) ~= "table" then
-	warn("E601")
+	warn("E611")
 	return false
 end
 if type(UI) ~= "table" or type(UI.Window) ~= "table" or type(UI.VLib) ~= "table" then
-	warn("E602")
+	warn("E612")
 	return false
 end
 if type(VUniverse) ~= "table" then
-	warn("E603")
+	warn("E613")
 	return false
 end
 
-local jjs = { sources = {}, failed = nil }
+local HubWindow = UI.Window
+local HubLib = UI.VLib
 
+local HubGui = nil
 do
-	local override = nil
-	if type(getgenv) == "function" then
-		local env = getgenv()
-		override = env and env.V_HUB_SOURCE
-	end
-	if type(override) == "string" and #override > 0 then
-		jjs.sources[#jjs.sources + 1] = override
-	end
-	jjs.sources[#jjs.sources + 1] = "https://ghfast.top/https://raw.githubusercontent.com/OvaLxrding/V/main/"
-	jjs.sources[#jjs.sources + 1] = "https://gh-proxy.com/https://raw.githubusercontent.com/OvaLxrding/V/main/"
-	jjs.sources[#jjs.sources + 1] = "https://raw.githubusercontent.com/OvaLxrding/V/main/"
-	jjs.sources[#jjs.sources + 1] = "https://cdn.jsdelivr.net/gh/OvaLxrding/V@main/"
+	local ok, gui = pcall(function() return HubLib:GetGui() end)
+	if ok then HubGui = gui end
 end
 
-function jjs.cachePath(path)
-	return "V Hub/vendor/" .. tostring(path):gsub("^vendor/", "")
-end
+local Options = {}
 
-function jjs.readCache(path)
-	local okFile, exists = pcall(function() return isfile(jjs.cachePath(path)) end)
-	if not okFile or not exists then return nil end
-	local ok, body = pcall(function() return readfile(jjs.cachePath(path)) end)
-	if ok and type(body) == "string" and #body > 200 then return body end
-	return nil
-end
-
-function jjs.writeCache(path, body)
+local function notifyUser(title, content, duration)
 	pcall(function()
-		if type(makefolder) == "function" then
-			if not isfolder("V Hub") then makefolder("V Hub") end
-			if not isfolder("V Hub/vendor") then makefolder("V Hub/vendor") end
-		end
-		writefile(jjs.cachePath(path), body)
+		HubLib:MakeNotification({
+			Name = tostring(title or "提示"),
+			Content = tostring(content or ""),
+			Time = tonumber(duration) or 3,
+		})
 	end)
 end
 
-function jjs.fetch(path)
-	local cached = jjs.readCache(path)
-	if cached then return cached end
-	for index = 1, #jjs.sources do
-		local ok, body = pcall(function() return game:HttpGet(jjs.sources[index] .. path) end)
-		if ok and type(body) == "string" and #body > 200 then
-			jjs.writeCache(path, body)
-			return body
+local Fluent = {
+	Options = Options,
+	Notify = function(_, payload)
+		payload = payload or {}
+		notifyUser(payload.Title, payload.Content, payload.Duration)
+	end,
+	SetTheme = function() end,
+}
+
+local function newEntry(id, kind)
+	local entry = { Value = nil, Kind = kind, ID = id }
+	function entry:SetValue(value)
+		if self.Element and type(self.Element.Set) == "function" then
+			self.Element:Set(value)
+		else
+			self.Value = value
 		end
 	end
-	jjs.failed = path
-	return nil
-end
-
-function jjs.require(path, name)
-	local body = jjs.fetch(path)
-	if not body then return nil end
-	local chunk = loadstring(body, name)
-	if type(chunk) ~= "function" then
-		jjs.failed = path
-		return nil
+	function entry:GetValue()
+		return self.Value
 	end
-	local ok, module = pcall(chunk)
-	if not ok or module == nil then
-		jjs.failed = path
-		return nil
+	function entry:Set(value)
+		self:SetValue(value)
 	end
-	return module
+	if type(id) == "string" and id ~= "" then
+		Options[id] = entry
+	end
+	return entry
 end
 
-if type(getgenv) == "function" then
-	pcall(function() getgenv().GojoDomainLoaded = nil end)
+local function fire(fn, ...)
+	if type(fn) ~= "function" then return end
+	pcall(fn, ...)
 end
 
-local function jjsRun()
+local function buildToggle(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Toggle")
+	entry.Value = cfg.Default == true
+	entry.Element = container:AddToggle({
+		Name = tostring(cfg.Title or id or "开关"),
+		Default = entry.Value,
+		Callback = function(value)
+			entry.Value = value == true
+			fire(cfg.Callback, value)
+		end,
+	})
+	return entry
+end
+
+local function buildSlider(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Slider")
+	local minValue = tonumber(cfg.Min) or 0
+	local maxValue = tonumber(cfg.Max) or 100
+	local rounding = tonumber(cfg.Rounding) or 0
+	local step = 10 ^ (-rounding)
+	entry.Value = tonumber(cfg.Default) or minValue
+	entry.Element = container:AddSlider({
+		Name = tostring(cfg.Title or id or "滑条"),
+		Min = minValue,
+		Max = maxValue,
+		Default = entry.Value,
+		Increment = step,
+		Callback = function(value)
+			entry.Value = value
+			fire(cfg.Callback, value)
+		end,
+	})
+	return entry
+end
+
+local function buildDropdown(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Dropdown")
+	local list = {}
+	local values = cfg.Values
+	if type(values) == "table" then
+		if #values > 0 then
+			for index = 1, #values do list[index] = values[index] end
+		else
+			for _, value in pairs(values) do list[#list + 1] = value end
+			table.sort(list)
+		end
+	end
+	if #list == 0 then list[1] = tostring(cfg.Default or "默认") end
+	local default = cfg.Default
+	if default == nil then default = list[1] end
+	entry.Value = default
+	entry.Element = container:AddDropdown({
+		Name = tostring(cfg.Title or id or "下拉"),
+		Options = list,
+		Default = default,
+		Callback = function(value)
+			entry.Value = value
+			fire(cfg.Callback, value)
+		end,
+	})
+	return entry
+end
+
+local function buildButton(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Button")
+	entry.Element = container:AddButton({
+		Name = tostring(cfg.Title or id or "按钮"),
+		Callback = function()
+			fire(cfg.Callback)
+		end,
+	})
+	return entry
+end
+
+local function buildParagraph(container, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	pcall(function()
+		container:AddParagraph({
+			Title = tostring(cfg.Title or ""),
+			Content = tostring(cfg.Content or ""),
+		})
+	end)
+end
+
+local function buildInput(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Input")
+	entry.Value = tostring(cfg.Default or "")
+	entry.Element = container:AddTextbox({
+		Name = tostring(cfg.Title or id or "输入"),
+		Default = entry.Value,
+		Placeholder = tostring(cfg.Placeholder or ""),
+		Callback = function(text)
+			entry.Value = text
+			fire(cfg.Callback, text)
+		end,
+	})
+	return entry
+end
+
+local function buildKeybind(container, id, cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local entry = newEntry(id, "Keybind")
+	entry.Value = tostring(cfg.Default or "Unknown")
+	entry.Element = container:AddBind({
+		Name = tostring(cfg.Title or id or "按键"),
+		Default = cfg.Default,
+		Callback = function(pressed)
+			if entry.Element and type(entry.Element.Get) == "function" then
+				entry.Value = entry.Element:Get()
+			end
+			fire(cfg.Callback, pressed)
+		end,
+		OnChanged = function(name)
+			entry.Value = name
+			fire(cfg.ChangedCallback, name)
+		end,
+	})
+	return entry
+end
+
+local wrapContainer
+
+wrapContainer = function(element)
+	local api = { Element = element }
+
+	function api:AddToggle(id, cfg) return buildToggle(element, id, cfg) end
+	function api:AddSlider(id, cfg) return buildSlider(element, id, cfg) end
+	function api:AddDropdown(id, cfg) return buildDropdown(element, id, cfg) end
+	function api:AddInput(id, cfg) return buildInput(element, id, cfg) end
+	function api:AddKeybind(id, cfg) return buildKeybind(element, id, cfg) end
+	function api:AddColorpicker(id, cfg) return buildButton(element, id, cfg) end
+
+	function api:AddButton(first, second)
+		if type(first) == "string" then return buildButton(element, first, second) end
+		return buildButton(element, nil, first)
+	end
+
+	function api:AddParagraph(first, second)
+		if type(first) == "table" then
+			buildParagraph(element, first)
+		else
+			buildParagraph(element, { Title = first, Content = second })
+		end
+	end
+
+	function api:AddSection(title, extra)
+		local name = title
+		if type(title) == "table" then name = title.Title or title.Name end
+		local section = element:AddSection({ Name = tostring(name or "分组") })
+		return wrapContainer(section)
+	end
+
+	return api
+end
+
+local TAB_ICONS = {
+	Combat = "swords", Targets = "crosshair", Movement = "navigation",
+	Characters = "user", Extras = "star", Items = "package",
+	["Auto Combo"] = "play", Keybinds = "keyboard", Settings = "settings",
+}
+
+local Window = {
+	Root = HubGui,
+	Minimized = false,
+	Size = UDim2.fromOffset(600, 480),
+}
+
+function Window:AddTab(cfg)
+	cfg = type(cfg) == "table" and cfg or {}
+	local title = tostring(cfg.Title or "标签")
+	local element = HubWindow:MakeTab({ Name = title, Icon = TAB_ICONS[cfg.Title] or cfg.Icon })
+	local api = wrapContainer(element)
+	api.Name = title
+	api.Element = element
+	return api
+end
+
+function Window:SelectTab() end
+function Window.Minimize() end
+
+local function runJjs()
 -- PATCH P14: Keybinds fixed on PC + mobile. Saved keys now really rebind after rejoin/autoload
 -- (Fluent's SetValue never ran ChangedCallback, so only the label changed). Mouse picks are
 -- rejected instead of silently binding KeyCode.Unknown, duplicate keys are warned about,
@@ -2811,7 +2978,7 @@ do
         end
         local okHook = pcall(function() oldDS = hookmetamethod(game, "__namecall", dsHook) end)
         if not okHook then
-            warn("[NH] auto-downslam: neither UseSetService nor hookmetamethod is available on this executor")
+            warn("E614")
         end
     end
 end
@@ -3027,7 +3194,7 @@ do
         end
     end)
 
-    print("[NH Hub] Auto Block Solo Target ready. Lock onto someone to assign your solo block target.")
+    
 end
 
 -- ============================================================
@@ -6020,7 +6187,7 @@ local function bfFireCharged(effTime, target, route, plan)
         if not ok then
             bfCancel()
             timing.status, timing.error = "sequence_error", tostring(err)
-            warn("[BlackFlash P11] input sequence stopped:", err)
+            warn("E614")
             return
         end
         if not bfValid(target, token) then bfCancel(); return end
@@ -6697,22 +6864,7 @@ end
 -- ============================================================
 -- FLUENT UI
 -- ============================================================
--- Vendored dependencies: the hub mirrors serve them, github.com does not.
-local Fluent = jjs.require("vendor/fluent.lua", "fluent")
-local SaveManager = jjs.require("vendor/save-manager.lua", "save-manager")
-local InterfaceManager = jjs.require("vendor/interface-manager.lua", "interface-manager")
-if not (Fluent and SaveManager and InterfaceManager) then
-    return false
-end
 
-local Window = Fluent:CreateWindow({
-    Title = "Nigga Hub", SubTitle = "Ultimate Edition", TabWidth = 130,
-    Size = mobile and UDim2.fromOffset(math.clamp(Camera.ViewportSize.X * 0.92, 300, 540), math.clamp(Camera.ViewportSize.Y * 0.80, 300, 460)) or UDim2.fromOffset(600, 480),
-    -- Fluent's built-in minimize state can desync after the first hide, which
-    -- makes a second Ctrl press fail to reopen the hub. Disable that listener
-    -- and route every minimize path through the visibility manager below.
-    Acrylic = not mobile, Theme = "Darker", MinimizeKey = Enum.KeyCode.Unknown
-})
 
 -- One authoritative hub-visibility path for the title-bar button, PC Ctrl, and
 -- the mobile green dot. Toggle from the REAL Root.Visible value each time, so
@@ -6720,240 +6872,18 @@ local Window = Fluent:CreateWindow({
 local HubUI = {Visible = true, LastToggle = 0}
 
 local function getHubRoot()
-    if Window and typeof(Window) == "table" then
-        local ok, root = pcall(function() return Window.Root end)
-        if ok and typeof(root) == "Instance" and root:IsA("GuiObject") then
-            return root
-        end
-    end
-    return nil
+    return Window and Window.Root or nil
 end
 
 -- Fluent's AcrylicPaint frame is the real backdrop. Keep its near-black glass
 -- tint, then move a small layered oval glow inside it (not a full-window wipe).
-_G.NH_PremiumTheme = (function()
-    local currentTween = nil
-    local currentBlob = nil
-    local currentSweepTween = nil
-    local currentSweep = nil
-
-    local function styleSoftOval(blob, name, size, tint, backgroundTransparency, rotation, shoulderTransparency, centerTransparency, position)
-        local shape = blob:FindFirstChild(name)
-        if not (shape and shape:IsA("Frame")) then
-            if shape then shape:Destroy() end
-            shape = Instance.new("Frame")
-            shape.Name = name
-            shape.AnchorPoint = Vector2.new(0.5, 0.5)
-            shape.Position = position or UDim2.fromScale(0.5, 0.5)
-            shape.BorderSizePixel = 0
-            shape.Active = false
-            shape.Selectable = false
-            shape.ZIndex = 1
-            shape.Parent = blob
-        end
-        shape.Size = size
-        shape.BackgroundColor3 = tint
-        shape.BackgroundTransparency = backgroundTransparency
-        shape.AnchorPoint = Vector2.new(0.5, 0.5)
-        shape.Position = position or UDim2.fromScale(0.5, 0.5)
-
-        local corner = shape:FindFirstChildOfClass("UICorner")
-        if not corner then
-            corner = Instance.new("UICorner")
-            corner.Parent = shape
-        end
-        corner.CornerRadius = UDim.new(1, 0)
-
-        local gradient = shape:FindFirstChild("NHPremiumBlobGradient")
-        if not (gradient and gradient:IsA("UIGradient")) then
-            if gradient then gradient:Destroy() end
-            gradient = Instance.new("UIGradient")
-            gradient.Name = "NHPremiumBlobGradient"
-            gradient.Parent = shape
-        end
-        gradient.Enabled = true
-        gradient.Rotation = rotation
-        gradient.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
-        -- Longer falloff shoulders feather the edge instead of making a crisp band.
-        gradient.Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0.00, 1.00),
-            NumberSequenceKeypoint.new(0.08, 0.995),
-            NumberSequenceKeypoint.new(0.20, shoulderTransparency),
-            NumberSequenceKeypoint.new(0.38, centerTransparency),
-            NumberSequenceKeypoint.new(0.50, centerTransparency),
-            NumberSequenceKeypoint.new(0.62, centerTransparency),
-            NumberSequenceKeypoint.new(0.80, shoulderTransparency),
-            NumberSequenceKeypoint.new(0.92, 0.995),
-            NumberSequenceKeypoint.new(1.00, 1.00),
-        })
-    end
-
-    local function Apply()
-        pcall(function() Fluent:SetTheme("Darker") end)
-
-        local paintFrame = Window and Window.AcrylicPaint and Window.AcrylicPaint.Frame
-        if not (paintFrame and paintFrame:IsA("GuiObject")) then
-            return false, "Fluent AcrylicPaint frame is unavailable"
-        end
-
-        local ok, err = pcall(function()
-            -- Remove both earlier full-frame wipe gradients if this is re-run.
-            local oldFloat = paintFrame:FindFirstChild("NHPremiumFloatGradient", true)
-            if oldFloat and oldFloat:IsA("UIGradient") then oldFloat:Destroy() end
-
-            local layer = paintFrame:FindFirstChild("NHPremiumFloatingGradient")
-            if not (layer and layer:IsA("Frame")) then
-                layer = Instance.new("Frame")
-                layer.Name = "NHPremiumFloatingGradient"
-                layer.Parent = paintFrame
-                local corner = Instance.new("UICorner")
-                corner.Name = "NHPremiumGradientCorner"
-                corner.CornerRadius = UDim.new(0, 8)
-                corner.Parent = layer
-            end
-            local oldWipe = layer:FindFirstChild("NHPremiumGradient", true)
-            if oldWipe and oldWipe:IsA("UIGradient") then oldWipe:Destroy() end
-
-            layer.AnchorPoint = Vector2.new(0, 0)
-            layer.Position = UDim2.fromScale(0, 0)
-            layer.Size = UDim2.fromScale(1, 1)
-            layer.BackgroundColor3 = Color3.fromRGB(8, 10, 15)
-            layer.BackgroundTransparency = 0.62
-            layer.BorderSizePixel = 0
-            layer.Active = false
-            layer.Selectable = false
-            layer.ClipsDescendants = true
-            layer.Visible = true
-            layer.ZIndex = 1
-
-            local blob = layer:FindFirstChild("NHPremiumBlob")
-            if not (blob and blob:IsA("Frame")) then
-                blob = Instance.new("Frame")
-                blob.Name = "NHPremiumBlob"
-                blob.BackgroundTransparency = 1
-                blob.BorderSizePixel = 0
-                blob.AnchorPoint = Vector2.new(0.5, 0.5)
-                blob.Size = UDim2.fromScale(0.94, 0.78)
-                blob.Position = UDim2.fromScale(0.12, 0.26)
-                blob.Active = false
-                blob.Selectable = false
-                blob.ZIndex = 1
-                blob.Parent = layer
-            end
-            blob.BackgroundTransparency = 1
-            blob.Size = UDim2.fromScale(0.94, 0.78)
-            blob.AnchorPoint = Vector2.new(0.5, 0.5)
-            blob.Visible = true
-
-            -- Remove the earlier pale glow if this script is reapplied in-place.
-            for _, oldName in ipairs({"GlowHorizontal", "GlowVertical", "GlowCore"}) do
-                local oldGlow = blob:FindFirstChild(oldName)
-                if oldGlow then oldGlow:Destroy() end
-            end
-
-            -- Broad, feathered blue and violet lobes overlap into a displaced cloud.
-            -- The outer layers are faint; the inner layers add color without a hard core.
-            styleSoftOval(blob, "BlueHaloWide", UDim2.fromScale(0.92, 0.82), Color3.fromRGB(79, 126, 255), 0.68, 0, 0.985, 0.84, UDim2.fromScale(0.35, 0.46))
-            styleSoftOval(blob, "VioletHaloWide", UDim2.fromScale(0.92, 0.82), Color3.fromRGB(151, 105, 244), 0.68, 0, 0.985, 0.84, UDim2.fromScale(0.65, 0.54))
-            styleSoftOval(blob, "BlueHaloTall", UDim2.fromScale(0.76, 0.98), Color3.fromRGB(92, 142, 255), 0.72, 90, 0.985, 0.86, UDim2.fromScale(0.35, 0.46))
-            styleSoftOval(blob, "VioletHaloTall", UDim2.fromScale(0.76, 0.98), Color3.fromRGB(166, 122, 255), 0.72, 90, 0.985, 0.86, UDim2.fromScale(0.65, 0.54))
-            styleSoftOval(blob, "BlueSoftMid", UDim2.fromScale(0.72, 0.72), Color3.fromRGB(77, 126, 255), 0.59, 0, 0.97, 0.76, UDim2.fromScale(0.39, 0.46))
-            styleSoftOval(blob, "VioletSoftMid", UDim2.fromScale(0.72, 0.72), Color3.fromRGB(151, 100, 245), 0.59, 0, 0.97, 0.76, UDim2.fromScale(0.61, 0.54))
-            styleSoftOval(blob, "BlueSoftCore", UDim2.fromScale(0.48, 0.56), Color3.fromRGB(112, 161, 255), 0.66, 90, 0.97, 0.78, UDim2.fromScale(0.40, 0.45))
-            styleSoftOval(blob, "VioletSoftCore", UDim2.fromScale(0.48, 0.56), Color3.fromRGB(183, 139, 255), 0.66, 90, 0.97, 0.78, UDim2.fromScale(0.60, 0.55))
-
-            -- A low-contrast silver-blue sweep adds a restrained sheen without washing out the blob.
-            local sweep = layer:FindFirstChild("NHPremiumBackdropSweep")
-            if not (sweep and sweep:IsA("Frame")) then
-                if sweep then sweep:Destroy() end
-                sweep = Instance.new("Frame")
-                sweep.Name = "NHPremiumBackdropSweep"
-                sweep.AnchorPoint = Vector2.new(0.5, 0.5)
-                sweep.Parent = layer
-            end
-            sweep.Size = UDim2.fromScale(0.28, 1.20)
-            sweep.BackgroundColor3 = Color3.fromRGB(222, 230, 250)
-            sweep.BackgroundTransparency = 0.74
-            sweep.BorderSizePixel = 0
-            sweep.Active = false
-            sweep.Selectable = false
-            sweep.ClipsDescendants = true
-            sweep.Visible = true
-            sweep.Rotation = 12
-            sweep.ZIndex = 2
-
-            local sweepCorner = sweep:FindFirstChildOfClass("UICorner")
-            if not sweepCorner then
-                sweepCorner = Instance.new("UICorner")
-                sweepCorner.Parent = sweep
-            end
-            sweepCorner.CornerRadius = UDim.new(0, 8)
-
-            local sweepGradient = sweep:FindFirstChild("NHPremiumBackdropSweepGradient")
-            if not (sweepGradient and sweepGradient:IsA("UIGradient")) then
-                if sweepGradient then sweepGradient:Destroy() end
-                sweepGradient = Instance.new("UIGradient")
-                sweepGradient.Name = "NHPremiumBackdropSweepGradient"
-                sweepGradient.Parent = sweep
-            end
-            sweepGradient.Enabled = true
-            sweepGradient.Rotation = 0
-            sweepGradient.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
-            sweepGradient.Transparency = NumberSequence.new({
-                NumberSequenceKeypoint.new(0.00, 1.00),
-                NumberSequenceKeypoint.new(0.24, 0.995),
-                NumberSequenceKeypoint.new(0.38, 0.96),
-                NumberSequenceKeypoint.new(0.46, 0.80),
-                NumberSequenceKeypoint.new(0.50, 0.64),
-                NumberSequenceKeypoint.new(0.54, 0.80),
-                NumberSequenceKeypoint.new(0.62, 0.96),
-                NumberSequenceKeypoint.new(0.76, 0.995),
-                NumberSequenceKeypoint.new(1.00, 1.00),
-            })
-
-            if currentSweep ~= sweep then
-                if currentSweepTween then pcall(function() currentSweepTween:Cancel() end) end
-                sweep.Position = UDim2.fromScale(-0.20, 0.40)
-                currentSweep = sweep
-                currentSweepTween = TweenService:Create(
-                    sweep,
-                    TweenInfo.new(24, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-                    {Position=UDim2.fromScale(1.20, 0.60)}
-                )
-                currentSweepTween:Play()
-            end
-
-            if currentBlob ~= blob then
-                if currentTween then pcall(function() currentTween:Cancel() end) end
-                -- Travel diagonally across most of the backdrop, with a gentle organic tilt.
-                blob.Position = UDim2.fromScale(0.12, 0.26)
-                blob.Rotation = -9
-                currentBlob = blob
-                currentTween = TweenService:Create(
-                    blob,
-                    TweenInfo.new(34, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-                    {Position=UDim2.fromScale(0.88, 0.74), Rotation=9}
-                )
-                currentTween:Play()
-            end
-        end)
-
-        if not ok then warn("[NH Theme] Floating glow failed: " .. tostring(err)) end
-        return ok, err
-    end
-
-    return {Apply=Apply}
-end)()
-local premiumApplied, premiumError = _G.NH_PremiumTheme.Apply()
-if not premiumApplied then
-    warn("[NH Theme] " .. tostring(premiumError or "Could not apply Fluent's premium backdrop."))
-end
+local premiumApplied, premiumError = true, nil
 
 function HubUI.SetVisible(visible)
     HubUI.Visible = visible and true or false
     local root = getHubRoot()
     if root then
-        pcall(function() root.Visible = HubUI.Visible end)
+        pcall(function() if root:IsA("ScreenGui") then root.Enabled = HubUI.Visible else root.Visible = HubUI.Visible end end)
     end
     pcall(function()
         if Window then Window.Minimized = not HubUI.Visible end
@@ -6968,7 +6898,7 @@ function HubUI.Toggle()
     local root = getHubRoot()
     local currentlyVisible = HubUI.Visible
     if root then
-        currentlyVisible = root.Visible
+        currentlyVisible = root:IsA("ScreenGui") and root.Enabled or root.Visible
     elseif Window then
         currentlyVisible = not Window.Minimized
     end
@@ -7009,15 +6939,15 @@ UserInputService.InputBegan:Connect(function(input)
 end)
 
 local Tabs = {}
-Tabs.Combat = Window:AddTab({Title="Combat", Icon="sword"})
-Tabs.Targets = Window:AddTab({Title="Targets", Icon="crosshair"})
-Tabs.Movement = Window:AddTab({Title="Movement", Icon="navigation"})
-Tabs.Characters = Window:AddTab({Title="Characters", Icon="user"})
-Tabs.Extras = Window:AddTab({Title="Extras", Icon="star"})
-Tabs.Items = Window:AddTab({Title="Items", Icon="package"})
-Tabs.Combos = Window:AddTab({Title="Auto Combo", Icon="play"})
-Tabs.Keybinds = Window:AddTab({Title="Keybinds", Icon="keyboard"})
-Tabs.Settings = Window:AddTab({Title="Settings", Icon="settings"})
+Tabs.Combat = Window:AddTab({Title="战斗", Icon="sword"})
+Tabs.Targets = Window:AddTab({Title="目标", Icon="crosshair"})
+Tabs.Movement = Window:AddTab({Title="移动", Icon="navigation"})
+Tabs.Characters = Window:AddTab({Title="角色", Icon="user"})
+Tabs.Extras = Window:AddTab({Title="其他", Icon="star"})
+Tabs.Items = Window:AddTab({Title="物品", Icon="package"})
+Tabs.Combos = Window:AddTab({Title="自动连招", Icon="play"})
+Tabs.Keybinds = Window:AddTab({Title="按键", Icon="keyboard"})
+Tabs.Settings = Window:AddTab({Title="脚本设置", Icon="settings"})
 
 -- Build a lightweight feature index as the tabs/sections create their controls.
 -- Search runs only after typing settles; it does not poll or scan the UI each frame.
@@ -7297,7 +7227,7 @@ _G.NH_FeatureSearch = (function()
             if type(tabWidth) == "number" then headerLeft = tabWidth + 26 end
         end
         if type(headerLeft) ~= "number" then
-            warn("[NH Search] Could not determine Fluent's header position.")
+            warn("E614")
             return false
         end
 
@@ -7523,7 +7453,7 @@ _G.NH_FeatureSearch = (function()
                     if not (scroller and scroller:IsA("ScrollingFrame")) then return end
                     local elementFrame = findExactFrame(entry, scroller)
                     if not elementFrame then
-                        warn("[NH Search] Could not resolve the exact control row: " .. tostring(entry.title))
+                        warn("E614")
                         return
                     end
 
@@ -7564,7 +7494,7 @@ _G.NH_FeatureSearch = (function()
                         pcall(function() stroke:Destroy() end)
                     end)
                 end)
-                if not ok then warn("[NH Search] Jump to exact feature failed: " .. tostring(err)) end
+                if not ok then warn("E614") end
             end)
         end
 
@@ -8676,12 +8606,12 @@ local remoteCache = {}
 local ToolController
 
 local function log(...)
-    if M.Config.Debug then print("[NH AG4]", ...) end
+    if M.Config.Debug then  end
 end
 local function notify(text)
     if getgenv().NH_HubBooting or not M.Config.Notify then return end
     pcall(function()
-        StarterGui:SetCore("SendNotification", {Title = "Auto Garuda v4", Text = text, Duration = 3})
+        StarterGui:SetCore("SendNotification", {Title="自动迦楼罗 v4", Text = text, Duration = 3})
     end)
 end
 local function track(c, list)
@@ -8927,7 +8857,7 @@ function M.stop() return M.Stop() end
 function M.toggle() if M.Enabled then return M.Stop() else return M.Start() end end
 function M.press() return pairedPress(select(1, resolveTarget())) end
 function M.debug() return M.Status() end
-function M.log() local s = M.Status(); print("[NH AG4]", s.phase, s.attempts, s.target or s.capturedTarget or "nil"); return s end
+function M.log() local s = M.Status(); return s end
 function M._destroy() return M.Destroy() end
 
 if not hookEffects() then state.lastError = "Effects remote missing" end
@@ -8938,7 +8868,7 @@ log("v" .. M.Version .. " backend ready; animation", state.animationId)
 return M
     end)
     if not okAG then
-        warn("[NH HUB] Auto Garuda module failed: " .. tostring(errAG))
+        warn("E614")
     end
 end
 
@@ -10111,13 +10041,13 @@ function CD.start()
 			scanAccum = 0
 			local ok, err = pcall(scan)
 			if not ok then
-				warn("[NH CDViewer] scan: " .. tostring(err))
+				warn("E614")
 			end
 		end
 
 		local ok2, err2 = pcall(animate, dt)
 		if not ok2 then
-			warn("[NH CDViewer] animate: " .. tostring(err2))
+			warn("E614")
 		end
 	end)
 end
@@ -10192,44 +10122,22 @@ function CD.debug()
 		local plr = Players:GetPlayerFromCharacter(char)
 		local u = readUlt(char)
 		local ev = readEvade(char)
-		print("[NH CDViewer]", char.Name,
-			"| moveset:", char:GetAttribute("Moveset"),
-			"| moves:", ms and #ms:GetChildren() or 0,
-			"| InUlt:", char:GetAttribute("InUlt"))
-		print(string.format(
-			"   EVADE raw=%s pct=%.2f ready=%s",
-			tostring(char:GetAttribute("Evade")),
-			ev or 0,
-			tostring(ev ~= nil and ev >= 1)
-		))
+		
+		
 		if plr then
-			print(string.format(
-				"   ULT  raw=%s pct=%.2f ready=%s full=%s ult2=%s",
-				tostring(plr:GetAttribute("Ultimate")),
-				u and u.pct or 0,
-				tostring(u and u.ready),
-				tostring(u and u.full),
-				tostring(u and u.ult2)
-			))
+			
 		else
-			print("   ULT  no Player object (NPC) -- bar hidden, as the game does")
+			
 		end
 		if ms then
 			for _, mv in ipairs(ms:GetChildren()) do
 				local ra = mv:GetAttribute("ReadyAt")
-				print(string.format(
-					"   %-22s key=%-4s ReadyAt=%-18s LastUse=%-18s remain=%s",
-					tostring(mv:GetAttribute("Tag") or mv.Name),
-					tostring(mv:GetAttribute("Key")),
-					tostring(ra),
-					tostring(mv:GetAttribute("LastUse")),
-					tostring(ra and (ra - now) or "n/a")
-				))
+				
 			end
 		end
 	end
 	if not any then
-		print("[NH CDViewer] nobody in range and nobody aimed at")
+		
 	end
 end
 
@@ -10250,7 +10158,7 @@ return CD
 
     end)
     if not okCD then
-        warn("[NH HUB] Cooldown Viewer module failed: " .. tostring(errCD))
+        warn("E614")
     end
 end
 
@@ -10466,7 +10374,7 @@ do
         IG.refresh()
     end)
     if not okIG then
-        warn("[NH HUB] Item Grabber module failed: " .. tostring(errIG))
+        warn("E614")
     end
 end
 
@@ -10716,18 +10624,18 @@ do
 end
 
 -- [COMBAT]
-Tabs.Combat:AddSection("Combat Automation")
+Tabs.Combat:AddSection("战斗自动化")
 -- Existing downslam, uppercut, and Flash Step controls stay together here.
-Tabs.Combat:AddToggle("TglAutoDownslam", {Title="Auto Downslam", Default=false, Callback=function(v) St.autoDownslamEnabled = v; if v then St.autoUppercutEnabled = false; pcall(function() Fluent.Options.TglAutoUppercut:SetValue(false) end) end end})
-Tabs.Combat:AddDropdown("DpDownslamMode", {Title="Auto Downslam Method", Values={"Blatant", "Legit"}, Default="Blatant", Callback=function(v) St.downslamMode = string.lower(v) end})
-Tabs.Combat:AddToggle("TglAutoUppercut", {Title="Auto Uppercut", Default=false, Callback=function(v) St.autoUppercutEnabled = v; if v then St.autoDownslamEnabled = false; pcall(function() Fluent.Options.TglAutoDownslam:SetValue(false) end) end end})
-Tabs.Combat:AddToggle("TglFlashStepM1", {Title="Flash Step M1s", Default=false, Callback=function(v) St.flashStepM1Enabled = v end})
-Tabs.Combat:AddSlider("SldFlashStepM1Range", {Title="Flash Step Range", Min=20, Max=200, Default=20, Rounding=0, Callback=function(v) St.flashStepM1Range = v end})
+Tabs.Combat:AddToggle("TglAutoDownslam", {Title="自动下砸", Default=false, Callback=function(v) St.autoDownslamEnabled = v; if v then St.autoUppercutEnabled = false; pcall(function() Fluent.Options.TglAutoUppercut:SetValue(false) end) end end})
+Tabs.Combat:AddDropdown("DpDownslamMode", {Title="自动下砸方式", Values={"Blatant", "Legit"}, Default="Blatant", Callback=function(v) St.downslamMode = string.lower(v) end})
+Tabs.Combat:AddToggle("TglAutoUppercut", {Title="自动上挑", Default=false, Callback=function(v) St.autoUppercutEnabled = v; if v then St.autoDownslamEnabled = false; pcall(function() Fluent.Options.TglAutoDownslam:SetValue(false) end) end end})
+Tabs.Combat:AddToggle("TglFlashStepM1", {Title="瞬步平A", Default=false, Callback=function(v) St.flashStepM1Enabled = v end})
+Tabs.Combat:AddSlider("SldFlashStepM1Range", {Title="瞬步范围", Min=20, Max=200, Default=20, Rounding=0, Callback=function(v) St.flashStepM1Range = v end})
 
-Tabs.Combat:AddSection("Auto Blocking")
+Tabs.Combat:AddSection("自动格挡")
 -- Base Auto Block now has its own option so PC/mobile shortcuts use the same
 -- callback as the menu instead of silently changing only the state table.
-Tabs.Combat:AddToggle("TglAutoBlockC", {Title="Auto Block", Default=false, Callback=function(v)
+Tabs.Combat:AddToggle("TglAutoBlockC", {Title="自动格挡", Default=false, Callback=function(v)
     St.autoBlockEnabled = v and true or false
     if not v then
         -- Do not leave Solo Block visibly enabled after the base engine stops.
@@ -10739,7 +10647,7 @@ Tabs.Combat:AddToggle("TglAutoBlockC", {Title="Auto Block", Default=false, Callb
         end
     end
 end})
-Tabs.Combat:AddToggle("TglAutoDashPredictC", {Title="Auto Dash Predict", Default=false, Callback=function(v)
+Tabs.Combat:AddToggle("TglAutoDashPredictC", {Title="自动闪避预判", Default=false, Callback=function(v)
     St.autoDashPredictEnabled = v
     if _G.NH_SetAutoDashPredict then pcall(_G.NH_SetAutoDashPredict, v) end
     if not v and not St.autoBlockEnabled and not St.autoPunishEnabled and not St.autoProjBlockEnabled
@@ -10747,20 +10655,20 @@ Tabs.Combat:AddToggle("TglAutoDashPredictC", {Title="Auto Dash Predict", Default
         _G.NH_forceStopBlock()
     end
 end})
-Tabs.Combat:AddToggle("TglAutoProjBlockC", {Title="Auto Projectile Block", Default=false, Callback=function(v)
+Tabs.Combat:AddToggle("TglAutoProjBlockC", {Title="自动格挡弹幕", Default=false, Callback=function(v)
     St.autoProjBlockEnabled = v
     if not v and not St.autoBlockEnabled and not St.autoDashPredictEnabled and not St.autoPunishEnabled
         and not getgenv().userIsBlocking and _G.NH_forceStopBlock then _G.NH_forceStopBlock() end
 end})
-Tabs.Combat:AddToggle("TglAutoPunishC", {Title="Auto Block + Punish", Default=false, Callback=function(v) St.autoPunishEnabled = v end})
-Tabs.Combat:AddToggle("TglAutoBlockBreakC", {Title="Auto Block Break", Default=false, Callback=function(v) St.autoBlockBreakEnabled = v end})
+Tabs.Combat:AddToggle("TglAutoPunishC", {Title="自动格挡反击", Default=false, Callback=function(v) St.autoPunishEnabled = v end})
+Tabs.Combat:AddToggle("TglAutoBlockBreakC", {Title="自动破防", Default=false, Callback=function(v) St.autoBlockBreakEnabled = v end})
 
 -- SOLO TARGET: auto-block one specific person only. Lock onto them (any lock-on
 -- path) and every block feature serves just them -- big lag cut because the 30Hz
 -- anim scanner and the per-frame projectile pass only ever look at ONE enemy.
-local SoloSection = Tabs.Combat:AddSection("Solo Block Target")
-SoloSection:AddParagraph({Title="How Solo Block works", Content="Enable this and lock onto someone. M1s, dash prediction, projectile casts and punish automation will only use that character; while no valid lock is selected, auto-defense waits instead of falling back to everyone."})
-SoloSection:AddToggle("TglAutoBlockSolo", {Title="Auto Block Solo Target", Default=false, Callback=function(v)
+local SoloSection = Tabs.Combat:AddSection("单人格挡目标")
+SoloSection:AddParagraph({Title="单人格挡说明", Content="Enable this and lock onto someone. M1s, dash prediction, projectile casts and punish automation will only use that character; while no valid lock is selected, auto-defense waits instead of falling back to everyone."})
+SoloSection:AddToggle("TglAutoBlockSolo", {Title="单人格挡目标", Default=false, Callback=function(v)
     St.autoBlockSoloEnabled = v and true or false
     -- Solo block IS auto block scoped to one person, so it drives the base toggle
     -- too. Turning it off drops the solo target and releases the block engine.
@@ -10773,7 +10681,7 @@ SoloSection:AddToggle("TglAutoBlockSolo", {Title="Auto Block Solo Target", Defau
         if not getgenv().userIsBlocking and _G.NH_forceStopBlock then _G.NH_forceStopBlock() end
     end
 end})
-SoloSection:AddButton({Title="Clear Solo Target (re-choose)", Callback=function()
+SoloSection:AddButton({Title="清除单人目标（重新选择）", Callback=function()
     if _G.NH_AutoBlockSolo then _G.NH_AutoBlockSolo.Clear() end
     notify("Solo Block", "Cleared. Lock onto someone else to re-choose.", 2)
 end})
@@ -10880,7 +10788,7 @@ do
                 pcall(rawSetValue, option, key, "Toggle")
             end
             local ok, err = pcall(opts.Apply, entry.code)
-            if not ok then warn("[NH Keybinds] " .. tostring(id) .. ": " .. tostring(err)) end
+            if not ok then warn("E614") end
             if fromUser then KB.AfterUserPick(entry.name, raw, entry.code, id) end
         end
         option = container:AddKeybind(id, {
@@ -10910,34 +10818,34 @@ do
     end
 end
 
-local BackdashSection = Tabs.Combat:AddSection("Auto Backdash")
+local BackdashSection = Tabs.Combat:AddSection("自动后撤")
 BackdashSection:AddToggle("TglDashBehindTarget", {
-    Title="Enable Auto Backdash",
+    Title="启用自动后撤",
     Default=false,
     Callback=function(v) St.dashBehindTargetEnabled = v and true or false end
 })
 
 if not mobile then
     St.KeyBinds.Add(BackdashSection, "KbDashBehindTarget", {
-        Title="Keybind:", Name="Auto Backdash", Default="B",
+        Title="按键：", Name="Auto Backdash", Default="B",
         Apply=function(code) Keys.dashBehindTargetKey = code end
     })
 else
     -- Mobile's on-screen button is the equivalent of the PC keybind, so its
     -- optional always-show control belongs in this same feature section too.
     BackdashSection:AddToggle("MbDashBehindTarget", {
-        Title="Show Auto Backdash Button",
+        Title="显示自动后撤按钮",
         Description="Optional: keep the BACKDASH button visible while Auto Backdash is disabled.",
         Default=false,
         Callback=function(v) _G.NH_btnManual["DashBehindBtn"] = v and true or false end
     })
 end
 
-Tabs.Combat:AddSection("Lock-On System")
-Tabs.Combat:AddParagraph({Title="Lock-On Info", Content="PC: hover an enemy and press the Lock-On key to lock. Press it on them again to unlock, or on another enemy to switch.\nMobile: enable this, aim your camera so the enemy is near the middle of your screen, then press the LOCK ON button to lock onto them. Aim at someone else and press again to switch, or press while aiming at your current target (or at empty space) to unlock."})
+Tabs.Combat:AddSection("锁定系统")
+Tabs.Combat:AddParagraph({Title="锁定说明", Content="PC: hover an enemy and press the Lock-On key to lock. Press it on them again to unlock, or on another enemy to switch.\nMobile: enable this, aim your camera so the enemy is near the middle of your screen, then press the LOCK ON button to lock onto them. Aim at someone else and press again to switch, or press while aiming at your current target (or at empty space) to unlock."})
 
 Tabs.Combat:AddToggle("TglLockOn", {
-    Title="Lock-On Enable", 
+    Title="启用锁定", 
     Default=false, 
     Callback=function(v) 
         St.lockOnEnabled = v 
@@ -10948,12 +10856,12 @@ Tabs.Combat:AddToggle("TglLockOn", {
         end 
     end
 })
-Tabs.Combat:AddDropdown("DpLockOnMethod", {Title="Lock-On Method", Values={"Body", "Camera", "Console"}, Default="Console", Callback=function(v) Cfg.LockOn.Method = v end})
-Tabs.Combat:AddToggle("TglLockOnESP", {Title="Lock-On ESP (see target through walls)", Default=false, Callback=function(v) Cfg.LockOn.ESP = v; if not v then clearLockOnHighlight() end end})
-Tabs.Combat:AddSlider("SldLockOnSmooth", {Title="Lock-On Smoothness", Min=0.01, Max=1, Default=0.15, Rounding=2, Callback=function(v) Cfg.LockOn.Smoothness = v end})
-Tabs.Combat:AddSlider("SldLockOnDist", {Title="Max Distance", Min=10, Max=250, Default=150, Rounding=0, Callback=function(v) Cfg.LockOn.MaxDistance = v end})
-Tabs.Combat:AddDropdown("DpLockOnTarget", {Title="Lock Target (player / dummy)", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
-Tabs.Combat:AddButton({Title="Refresh Lock Targets", Callback=function()
+Tabs.Combat:AddDropdown("DpLockOnMethod", {Title="锁定方式", Values={"Body", "Camera", "Console"}, Default="Console", Callback=function(v) Cfg.LockOn.Method = v end})
+Tabs.Combat:AddToggle("TglLockOnESP", {Title="锁定透视（隔墙可见）", Default=false, Callback=function(v) Cfg.LockOn.ESP = v; if not v then clearLockOnHighlight() end end})
+Tabs.Combat:AddSlider("SldLockOnSmooth", {Title="锁定平滑", Min=0.01, Max=1, Default=0.15, Rounding=2, Callback=function(v) Cfg.LockOn.Smoothness = v end})
+Tabs.Combat:AddSlider("SldLockOnDist", {Title="最大距离", Min=10, Max=250, Default=150, Rounding=0, Callback=function(v) Cfg.LockOn.MaxDistance = v end})
+Tabs.Combat:AddDropdown("DpLockOnTarget", {Title="锁定目标（玩家/假人）", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
+Tabs.Combat:AddButton({Title="刷新锁定目标", Callback=function()
     local t = getValidTargets(LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
     local names = {}
     for _, v in ipairs(t) do table.insert(names, v.name) end
@@ -10961,7 +10869,7 @@ Tabs.Combat:AddButton({Title="Refresh Lock Targets", Callback=function()
     Fluent.Options.DpLockOnTarget:SetValues(names)
     notify("Lock-On", "Found " .. #names .. " targets.", 2)
 end})
-Tabs.Combat:AddButton({Title="Lock Selected Target", Callback=function()
+Tabs.Combat:AddButton({Title="锁定所选目标", Callback=function()
     local selected = Fluent.Options.DpLockOnTarget.Value
     if not selected or selected == "(none found)" or selected == "(press Refresh)" then
         notify("Lock-On", "Pick a target from the list first.", 3); return
@@ -10975,7 +10883,7 @@ Tabs.Combat:AddButton({Title="Lock Selected Target", Callback=function()
     enableLockOn()
     notify("Lock-On", "Locked onto " .. chosen.name .. ".", 3)
 end})
-Tabs.Combat:AddButton({Title="Unlock / Clear Target", Callback=function()
+Tabs.Combat:AddButton({Title="解锁/清除目标", Callback=function()
     St.lockOnTarget = nil
     RunService:UnbindFromRenderStep("HubLockOnSystem")
     RunService:UnbindFromRenderStep("HubLockOnBody")
@@ -10986,10 +10894,10 @@ Tabs.Combat:AddButton({Title="Unlock / Clear Target", Callback=function()
 end})
 
 -- [TARGETS]
-local DpTargets = Tabs.Targets:AddDropdown("DpTargetSelect", {Title="Select Target", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
+local DpTargets = Tabs.Targets:AddDropdown("DpTargetSelect", {Title="选择目标", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
 
 Tabs.Targets:AddButton({
-    Title = "Refresh Targets",
+    Title="刷新目标",
     Callback = function()
         local t = getValidTargets(LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))
         local names = {}
@@ -11001,7 +10909,7 @@ Tabs.Targets:AddButton({
 })
 
 Tabs.Targets:AddButton({
-    Title = "Attach to Selected",
+    Title="附着到所选",
     Callback = function()
         local selected = Fluent.Options.DpTargetSelect.Value
         if not selected or selected == "(none found)" or selected == "(press Refresh)" then 
@@ -11024,16 +10932,16 @@ Tabs.Targets:AddButton({
     end
 })
 
-Tabs.Targets:AddButton({Title="Attach to closest", Callback=function()
+Tabs.Targets:AddButton({Title="附着到最近", Callback=function()
     local t = getValidTargets(LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))[1]
     if t then startAttach(t) notify("Attached", "Attached to "..t.name, 2) end
 end})
 
-Tabs.Targets:AddButton({Title="Detach", Callback=stopAttach})
+Tabs.Targets:AddButton({Title="脱离", Callback=stopAttach})
 
-Tabs.Targets:AddSection("Rotate Target")
+Tabs.Targets:AddSection("旋转目标")
 Tabs.Targets:AddToggle("TglRotate", {
-    Title = "Rotate Selected Target",
+    Title="旋转所选目标",
     Default = false,
     Tooltip = "Orbit the dropdown target at high speed, always facing them. Velocity-predicted so moving/dashing targets don't drag you behind.",
     Callback = function(v)
@@ -11063,7 +10971,7 @@ Tabs.Targets:AddToggle("TglRotate", {
     end
 })
 Tabs.Targets:AddToggle("TglRotateLockOn", {
-    Title = "Rotate Locked-On Target",
+    Title="旋转已锁定目标",
     Default = false,
     Tooltip = "Enable Lock-On and lock a target, then toggle this once to orbit around them. It follows lock switches and stops when the lock is cleared.",
     Callback = function(v)
@@ -11196,27 +11104,27 @@ do
 end
 St.ToggleKeybinds.Add(Tabs.Targets, "KbRotateLockOn", "Rotate Locked-On Keybind:",
     "rotateLockOnKey", "TglRotateLockOn", "T")
-Tabs.Targets:AddSlider("SldRotateSpeed", {Title="Rotate Speed", Min=2, Max=30, Default=11, Rounding=0, Callback=function(v) Cfg.rotateSpeed = v end})
-Tabs.Targets:AddSlider("SldRotateRadius", {Title="Rotate Radius", Min=2, Max=25, Default=6, Rounding=1, Callback=function(v) Cfg.rotateRadius = v end})
+Tabs.Targets:AddSlider("SldRotateSpeed", {Title="旋转速度", Min=2, Max=30, Default=11, Rounding=0, Callback=function(v) Cfg.rotateSpeed = v end})
+Tabs.Targets:AddSlider("SldRotateRadius", {Title="旋转半径", Min=2, Max=25, Default=6, Rounding=1, Callback=function(v) Cfg.rotateRadius = v end})
 
-Tabs.Targets:AddSection("Spectate Target")
-Tabs.Targets:AddDropdown("DpSpectate", {Title="Select Player", Values={"(press Refresh)"}, Default=1, Callback=function(v) _G.spectateTargetName = v end})
-Tabs.Targets:AddButton({Title="Refresh Players", Callback=function()
+Tabs.Targets:AddSection("观战目标")
+Tabs.Targets:AddDropdown("DpSpectate", {Title="选择玩家", Values={"(press Refresh)"}, Default=1, Callback=function(v) _G.spectateTargetName = v end})
+Tabs.Targets:AddButton({Title="刷新玩家", Callback=function()
     local names = {}
     for _,p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then table.insert(names, p.Name) end end
     if #names == 0 then names = {"(none)"} end
     Fluent.Options.DpSpectate:SetValues(names)
 end})
-Tabs.Targets:AddButton({Title="Spectate", Callback=function()
+Tabs.Targets:AddButton({Title="观战", Callback=function()
     if _G.spectateTargetName and _G.spectateTargetName ~= "(none)" and _G.spectateTargetName ~= "(press Refresh)" then
         if ovStartSpectate(_G.spectateTargetName) then notify("Spectating", _G.spectateTargetName, 2) end
     end
 end})
-Tabs.Targets:AddButton({Title="Stop Spectating", Callback=function() ovStopSpectate() notify("Spectating", "Stopped.", 2) end})
+Tabs.Targets:AddButton({Title="停止观战", Callback=function() ovStopSpectate() notify("Spectating", "Stopped.", 2) end})
 
 
 -- [MOVEMENT & BF]
-Tabs.Movement:AddToggle("TglFly", {Title="Enable Fly", Default=false, Callback=function(v) 
+Tabs.Movement:AddToggle("TglFly", {Title="启用飞行", Default=false, Callback=function(v) 
     St.flyToggleOn = v 
     if v then 
         St.flyActive=true enableFly() 
@@ -11224,17 +11132,17 @@ Tabs.Movement:AddToggle("TglFly", {Title="Enable Fly", Default=false, Callback=f
         disableFly() 
     end 
 end})
-Tabs.Movement:AddSlider("SldFlySpeed", {Title="Fly Speed", Min=10, Max=650, Default=150, Rounding=0, Callback=function(v) Cfg.FlySpeed = v end})
+Tabs.Movement:AddSlider("SldFlySpeed", {Title="飞行速度", Min=10, Max=650, Default=150, Rounding=0, Callback=function(v) Cfg.FlySpeed = v end})
 if mobile then
-    Tabs.Movement:AddToggle("TglShowBoost", {Title="Show Boost Button", Default=false, Callback=function(v) _G.NH_boostVisible = v end})
-    Tabs.Movement:AddToggle("TglFlyUpDown", {Title="Show Up / Down Buttons", Default=false, Callback=function(v) _G.NH_upDownVisible = v end})
+    Tabs.Movement:AddToggle("TglShowBoost", {Title="显示加速按钮", Default=false, Callback=function(v) _G.NH_boostVisible = v end})
+    Tabs.Movement:AddToggle("TglFlyUpDown", {Title="显示上升/下降按钮", Default=false, Callback=function(v) _G.NH_upDownVisible = v end})
 end
 
-Tabs.Movement:AddSection("Dash & Wallhop Modifiers")
-Tabs.Movement:AddToggle("TglNoDashCooldown", {Title="No Dash Cooldown", Default=false, Callback=function(v) if v then enableNoDashCooldown() else disableNoDashCooldown() end end})
-Tabs.Movement:AddToggle("TglWallhop", {Title="Infinite Wallhop Assist", Default=false, Callback=function(v) if v then enableNoWallhopCooldown() else St.wallhopMetaHooked=false if Cn.wallhopConn2 then Cn.wallhopConn2:Disconnect() end end end})
-Tabs.Movement:AddToggle("TglDashMult", {Title="Dash Multiplier", Default=false, Callback=function(v) St.dashMultiplierEnabled = v if v then applyDashMultiplier(St.dashMultiplierValue) end end})
-Tabs.Movement:AddSlider("SldDashMult", {Title="Dash Mult Value", Min=0, Max=5, Default=1, Rounding=1, Callback=function(v) St.dashMultiplierValue = v if St.dashMultiplierEnabled then applyDashMultiplier(v) end end})
+Tabs.Movement:AddSection("冲刺与蹬墙修改")
+Tabs.Movement:AddToggle("TglNoDashCooldown", {Title="无冲刺冷却", Default=false, Callback=function(v) if v then enableNoDashCooldown() else disableNoDashCooldown() end end})
+Tabs.Movement:AddToggle("TglWallhop", {Title="无限蹬墙辅助", Default=false, Callback=function(v) if v then enableNoWallhopCooldown() else St.wallhopMetaHooked=false if Cn.wallhopConn2 then Cn.wallhopConn2:Disconnect() end end end})
+Tabs.Movement:AddToggle("TglDashMult", {Title="冲刺倍率", Default=false, Callback=function(v) St.dashMultiplierEnabled = v if v then applyDashMultiplier(St.dashMultiplierValue) end end})
+Tabs.Movement:AddSlider("SldDashMult", {Title="冲刺倍率数值", Min=0, Max=5, Default=1, Rounding=1, Callback=function(v) St.dashMultiplierValue = v if St.dashMultiplierEnabled then applyDashMultiplier(v) end end})
 
 -- [CHARACTERS]
 -- ===== Auto Todo Black Flash =====
@@ -11868,7 +11776,7 @@ do
             S.suppressUntil = os.clock() + 0.75
             S.source = source or S.source
             if not ok then
-                warn("[NH Earthquake] " .. tostring(via))
+                warn("E614")
                 notify("Auto Earthquake", "Release failed; check the developer console.", 4)
             end
             return ok
@@ -12640,11 +12548,11 @@ do
 end
 
 -- ── SECTION 1: Auto Character Moves ─────────────────────────
-Tabs.Characters:AddSection("Auto Character Moves")
-Tabs.Characters:AddToggle("TglTodoPerfectSwap", {Title="Auto Todo Perfect Swap", Default=false, Callback=function(v) St.todoEnabled = v end})
-Tabs.Characters:AddToggle("TglTodoBlackFlash", {Title="Auto Todo Black Flash", Default=false, Callback=function(v) St.todoBlackFlashEnabled = v if v then enableTodoBlackFlash() else disconnectTodoBlackFlash() end end})
+Tabs.Characters:AddSection("自动角色技能")
+Tabs.Characters:AddToggle("TglTodoPerfectSwap", {Title="自动东堂完美换位", Default=false, Callback=function(v) St.todoEnabled = v end})
+Tabs.Characters:AddToggle("TglTodoBlackFlash", {Title="自动东堂黑闪", Default=false, Callback=function(v) St.todoBlackFlashEnabled = v if v then enableTodoBlackFlash() else disconnectTodoBlackFlash() end end})
 Tabs.Characters:AddToggle("TglTodoVoid", {
-    Title="Todo Void",
+    Title="东堂虚空",
     Description="Uses native Todo Swift Kick; lock a target or it selects the nearest live target.",
     Default=false,
     Callback=function(v)
@@ -12668,7 +12576,7 @@ Tabs.Characters:AddToggle("TglTodoVoid", {
     end
 })
 Tabs.Characters:AddToggle("TglTodoSweepVariant", {
-    Title="Todo Sweep Varient",
+    Title="东堂扫荡变体",
     Description="Toggle this on to change Todo's first move to the Pebble Throw varient.",
     Default=false,
     Callback=function(v)
@@ -12695,16 +12603,16 @@ Tabs.Characters:AddToggle("TglTodoSweepVariant", {
         end
     end
 })
-Tabs.Characters:AddToggle("TglNanami", {Title="Auto Nanami Ratio", Default=false, Callback=function(v) if v then startNanami() else stopNanami() end end})
-Tabs.Characters:AddButton({Title="Instant Blackhole (Yuki)", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Dragonfly5101/Minosr/refs/heads/main/InstantBlackHole.JJS"))() end) end})
-Tabs.Characters:AddToggle("TglAutoWorldSlash", {Title="Auto World Cutting Slash", Default=false, Callback=function(v) St.autoWorldSlashEnabled = v if v then _G.NH_enableWorldSlash() else _G.NH_disableWorldSlash() end end})
-Tabs.Characters:AddToggle("TglAutoFrogVariant", {Title="Auto Frog Variant (Megumi)", Default=false, Callback=function(v) St.autoFrogVariantEnabled = v if v then _G.NH_enableFrog() else _G.NH_disableFrog() end end})
-Tabs.Characters:AddToggle("TglAutoEarthquake", {Title="Auto Earthquake (Mahoraga)", Default=false, Callback=function(v) St.autoEarthquakeEnabled = v if v then _G.NH_enableEq() else _G.NH_disableEq() end end})
-Tabs.Characters:AddParagraph({Title="Auto Mahoraga Throw Info", Content="Aim your camera where you want to throw."})
-Tabs.Characters:AddToggle("TglAutoMahoragaThrow", {Title="Auto Mahoraga Throw", Default=false, Callback=function(v) St.autoMahoragaThrowEnabled = v if v then _G.NH_enableMahoragaThrow() else _G.NH_disableMahoragaThrow() end end})
-Tabs.Characters:AddToggle("TglAutoShutUp", {Title="Auto Shut Up (Mangaka)", Default=false, Callback=function(v) St.autoShutUpEnabled = v if v then _G.NH_enableShutUp() else _G.NH_disableShutUp() end end})
-Tabs.Characters:AddToggle("TglAutoCounter", {Title="Auto Counter", Default=false, Callback=function(v) if v then _G.NH_enableAutoCounter() else _G.NH_disableAutoCounter() end end})
-Tabs.Characters:AddToggle("TglAutoGaruda", {Title="Auto Garuda Rebound (Yuki)", Default=false, Callback=function(v)
+Tabs.Characters:AddToggle("TglNanami", {Title="自动七海比率", Default=false, Callback=function(v) if v then startNanami() else stopNanami() end end})
+Tabs.Characters:AddButton({Title="瞬间黑洞（悠希）", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Dragonfly5101/Minosr/refs/heads/main/InstantBlackHole.JJS"))() end) end})
+Tabs.Characters:AddToggle("TglAutoWorldSlash", {Title="自动世界斩", Default=false, Callback=function(v) St.autoWorldSlashEnabled = v if v then _G.NH_enableWorldSlash() else _G.NH_disableWorldSlash() end end})
+Tabs.Characters:AddToggle("TglAutoFrogVariant", {Title="自动青蛙变体（惠）", Default=false, Callback=function(v) St.autoFrogVariantEnabled = v if v then _G.NH_enableFrog() else _G.NH_disableFrog() end end})
+Tabs.Characters:AddToggle("TglAutoEarthquake", {Title="自动地震（魔虚罗）", Default=false, Callback=function(v) St.autoEarthquakeEnabled = v if v then _G.NH_enableEq() else _G.NH_disableEq() end end})
+Tabs.Characters:AddParagraph({Title="魔虚罗投掷说明", Content="Aim your camera where you want to throw."})
+Tabs.Characters:AddToggle("TglAutoMahoragaThrow", {Title="自动魔虚罗投掷", Default=false, Callback=function(v) St.autoMahoragaThrowEnabled = v if v then _G.NH_enableMahoragaThrow() else _G.NH_disableMahoragaThrow() end end})
+Tabs.Characters:AddToggle("TglAutoShutUp", {Title="自动闭嘴（漫画家）", Default=false, Callback=function(v) St.autoShutUpEnabled = v if v then _G.NH_enableShutUp() else _G.NH_disableShutUp() end end})
+Tabs.Characters:AddToggle("TglAutoCounter", {Title="自动反击", Default=false, Callback=function(v) if v then _G.NH_enableAutoCounter() else _G.NH_disableAutoCounter() end end})
+Tabs.Characters:AddToggle("TglAutoGaruda", {Title="自动迦楼罗回弹（悠希）", Default=false, Callback=function(v)
     local AG = _G.NH_AutoGaruda
     if not AG then notify("Auto Garuda", "Module failed to load.", 3) return end
     if v then
@@ -12716,50 +12624,50 @@ Tabs.Characters:AddToggle("TglAutoGaruda", {Title="Auto Garuda Rebound (Yuki)", 
     end
 end})
 
-Tabs.Characters:AddParagraph({Title="Haruta Backstab Info", Content="Equip Haruta with sword. Press 2 (PC) or tap your 2nd move (mobile) to dash behind your target and backstab. Want a separate mobile button too? Turn on 'Show Backstab UI Button'. You can enable this UI button in the Settings tab."})
-Tabs.Characters:AddToggle("TglHarutaBs", {Title="Haruta Backstab", Default=false, Callback=function(v) St.harutaBackstabEnabled = v end})
+Tabs.Characters:AddParagraph({Title="春太背刺说明", Content="Equip Haruta with sword. Press 2 (PC) or tap your 2nd move (mobile) to dash behind your target and backstab. Want a separate mobile button too? Turn on 'Show Backstab UI Button'. You can enable this UI button in the Settings tab."})
+Tabs.Characters:AddToggle("TglHarutaBs", {Title="春太背刺", Default=false, Callback=function(v) St.harutaBackstabEnabled = v end})
 if mobile then
-    Tabs.Characters:AddToggle("TglHarutaBsBtn", {Title="Show Backstab UI Button", Default=false, Callback=function(v) St.harutaBsBtnEnabled = v end})
+    Tabs.Characters:AddToggle("TglHarutaBsBtn", {Title="显示背刺按钮", Default=false, Callback=function(v) St.harutaBsBtnEnabled = v end})
 end
-Tabs.Characters:AddToggle("TglAutoQTE", {Title="Auto QTE (Hiromi & Beam Clash)", Default=false, Callback=function(v) St.autoQteEnabled = v if v then startAutoQTE() else stopAutoQTE() end end})
-Tabs.Characters:AddSlider("SldQTESpeed", {Title="QTE Speed (Clicks per sec)", Min=1, Max=50, Default=15, Rounding=0, Callback=function(v) St.qteSpeed = v end})
-Tabs.Characters:AddButton({Title="Higuruma Vote Viewer", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Dragonfly5101/Minosr/refs/heads/main/HigarumaVoteView.JJS"))() end) end})
+Tabs.Characters:AddToggle("TglAutoQTE", {Title="自动 QTE（日车与对波）", Default=false, Callback=function(v) St.autoQteEnabled = v if v then startAutoQTE() else stopAutoQTE() end end})
+Tabs.Characters:AddSlider("SldQTESpeed", {Title="QTE 速度（次/秒）", Min=1, Max=50, Default=15, Rounding=0, Callback=function(v) St.qteSpeed = v end})
+Tabs.Characters:AddButton({Title="日车投票查看", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/Dragonfly5101/Minosr/refs/heads/main/HigarumaVoteView.JJS"))() end) end})
 
 -- ── SECTION 2: Black Flash Chain ─────────────────────────────
-Tabs.Characters:AddSection("Black Flash Chain")
-Tabs.Characters:AddParagraph({Title="Auto Black Flash Info", Content="Curved dash-behind + auto Black Flash. Uses v109 timing and native PC/mobile inputs. Start with BF Timing 0.26. Inputs are serialized; frame stalls or server rejection can still miss. Inspect _G.NH_bfTimingStatus() for the last pair."})
-Tabs.Characters:AddToggle("TglAutoBF", {Title="Auto Black Flash Chain", Default=false, Callback=function(v) St.bfEnabled = v if v then bfStartAll() else bfStopAll() end end})
-Tabs.Characters:AddSlider("BFDetect", {Title="Detect Range", Min=4, Max=20, Default=10, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("DETECT_RANGE", v) end end})
-Tabs.Characters:AddSlider("BFCurve", {Title="Curve Width", Min=0, Max=12, Default=5, Rounding=1, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CURVE", v) end end})
-Tabs.Characters:AddSlider("BFBackGap", {Title="Back Gap", Min=1, Max=8, Default=4.5, Rounding=1, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("BACKGAP", v) end end})
-Tabs.Characters:AddSlider("BFLead", {Title="Predict Lead", Min=0.1, Max=0.6, Default=0.32, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("PREDICT", v) end end})
-Tabs.Characters:AddToggle("TglBFSmart", {Title="Smart Prediction", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("SMART", v) end end})
-Tabs.Characters:AddSlider("BFNetLead", {Title="Network Lead", Min=0, Max=2, Default=1, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("NET_LEAD", v) end end})
-Tabs.Characters:AddSlider("BFCam", {Title="Camera Follow Speed", Min=0.1, Max=1.5, Default=0.6, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CAM_SENS", v) end end})
-Tabs.Characters:AddSlider("BFTiming", {Title="BF Timing", Min=0.15, Max=0.4, Default=0.26, Rounding=3, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("BF_TIMING", v) end end})
-Tabs.Characters:AddSlider("BFSpeedCap", {Title="Dash Speed Cap", Min=120, Max=600, Default=320, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("SPEEDCAP", v) end end})
-Tabs.Characters:AddSlider("BFAntiFling", {Title="Anti-Fling Sens", Min=12, Max=60, Default=28, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("ANTIFLING", v) end end})
-Tabs.Characters:AddToggle("TglBFCamFollow", {Title="BF Camera Follow", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CAM_STEER", v) end end})
-Tabs.Characters:AddToggle("TglBFAutoFlash", {Title="Auto Flash on Arrival", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("AUTO_BF", v) end end})
-Tabs.Characters:AddToggle("TglBFChain", {Title="Chain Reposition", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CHAIN", v) end end})
+Tabs.Characters:AddSection("黑闪连段")
+Tabs.Characters:AddParagraph({Title="自动黑闪说明", Content="Curved dash-behind + auto Black Flash. Uses v109 timing and native PC/mobile inputs. Start with BF Timing 0.26. Inputs are serialized; frame stalls or server rejection can still miss. Inspect _G.NH_bfTimingStatus() for the last pair."})
+Tabs.Characters:AddToggle("TglAutoBF", {Title="自动黑闪连段", Default=false, Callback=function(v) St.bfEnabled = v if v then bfStartAll() else bfStopAll() end end})
+Tabs.Characters:AddSlider("BFDetect", {Title="检测范围", Min=4, Max=20, Default=10, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("DETECT_RANGE", v) end end})
+Tabs.Characters:AddSlider("BFCurve", {Title="曲线宽度", Min=0, Max=12, Default=5, Rounding=1, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CURVE", v) end end})
+Tabs.Characters:AddSlider("BFBackGap", {Title="背后间隙", Min=1, Max=8, Default=4.5, Rounding=1, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("BACKGAP", v) end end})
+Tabs.Characters:AddSlider("BFLead", {Title="预判提前量", Min=0.1, Max=0.6, Default=0.32, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("PREDICT", v) end end})
+Tabs.Characters:AddToggle("TglBFSmart", {Title="智能预判", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("SMART", v) end end})
+Tabs.Characters:AddSlider("BFNetLead", {Title="网络提前量", Min=0, Max=2, Default=1, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("NET_LEAD", v) end end})
+Tabs.Characters:AddSlider("BFCam", {Title="镜头跟随速度", Min=0.1, Max=1.5, Default=0.6, Rounding=2, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CAM_SENS", v) end end})
+Tabs.Characters:AddSlider("BFTiming", {Title="黑闪时机", Min=0.15, Max=0.4, Default=0.26, Rounding=3, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("BF_TIMING", v) end end})
+Tabs.Characters:AddSlider("BFSpeedCap", {Title="冲刺速度上限", Min=120, Max=600, Default=320, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("SPEEDCAP", v) end end})
+Tabs.Characters:AddSlider("BFAntiFling", {Title="防弹飞灵敏度", Min=12, Max=60, Default=28, Rounding=0, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("ANTIFLING", v) end end})
+Tabs.Characters:AddToggle("TglBFCamFollow", {Title="黑闪镜头跟随", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CAM_STEER", v) end end})
+Tabs.Characters:AddToggle("TglBFAutoFlash", {Title="到达自动闪", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("AUTO_BF", v) end end})
+Tabs.Characters:AddToggle("TglBFChain", {Title="连段重新定位", Default=true, Callback=function(v) if _G.NH_bfSet then _G.NH_bfSet("CHAIN", v) end end})
 if mobile then
-    Tabs.Characters:AddToggle("TglBFChainBtn", {Title="Show BF Chain UI Button", Default=false, Callback=function(v) St.bfChainBtnEnabled = v end})
+    Tabs.Characters:AddToggle("TglBFChainBtn", {Title="显示黑闪连段按钮", Default=false, Callback=function(v) St.bfChainBtnEnabled = v end})
 end
 
 -- ── SECTION 3: 0.2 Kill All (Gojo) ──────────────────────────
-Tabs.Characters:AddSection("0.2 Kill All (Gojo)")
-Tabs.Characters:AddToggle("TglSweep", {Title="Sweep All", Default=false, Callback=function(v) St.sweepActive = v; if v then Workspace.FallenPartsDestroyHeight = Cfg.fallenHeight runSweep() else Workspace.FallenPartsDestroyHeight = St.originalFallenHeight end end})
-Tabs.Characters:AddToggle("TglSweepOverlay", {Title="Show Sweep Target Overlay", Default=false, Callback=function(v) St.overlayEnabled = v if v then buildOverlay() else destroyOverlay() end end})
-Tabs.Characters:AddButton({Title="Start Hunt", Callback=runHunt})
-Tabs.Characters:AddButton({Title="Stop Hunt", Callback=stopHunt})
-Tabs.Characters:AddToggle("TglDomainTP", {Title="No Domain TP", Default=false, Callback=function(v) St.noDomainTP = v end})
-Tabs.Characters:AddButton({Title="Force Reset", Callback=forceReset})
-Tabs.Characters:AddButton({Title="Check AC Status", Callback=checkACStatus})
+Tabs.Characters:AddSection("0.2 秒全杀（五条）")
+Tabs.Characters:AddToggle("TglSweep", {Title="扫荡全部", Default=false, Callback=function(v) St.sweepActive = v; if v then Workspace.FallenPartsDestroyHeight = Cfg.fallenHeight runSweep() else Workspace.FallenPartsDestroyHeight = St.originalFallenHeight end end})
+Tabs.Characters:AddToggle("TglSweepOverlay", {Title="显示扫荡目标浮层", Default=false, Callback=function(v) St.overlayEnabled = v if v then buildOverlay() else destroyOverlay() end end})
+Tabs.Characters:AddButton({Title="开始狩猎", Callback=runHunt})
+Tabs.Characters:AddButton({Title="停止狩猎", Callback=stopHunt})
+Tabs.Characters:AddToggle("TglDomainTP", {Title="无领域传送", Default=false, Callback=function(v) St.noDomainTP = v end})
+Tabs.Characters:AddButton({Title="强制重生", Callback=forceReset})
+Tabs.Characters:AddButton({Title="检查反作弊状态", Callback=checkACStatus})
 
 -- ── Todo Range Swap (infinite range) ────────────────
-Tabs.Characters:AddSection("Todo Range Swap")
-Tabs.Characters:AddParagraph({Title="Todo Range Swap Info", Content="Infinite-range Boogie Woogie swap. 1) Enable Todo Range Swap. 2) If AC is active, press Start Hunt (the same Gojo hunt; press Stop Hunt to cancel). 3) Refresh + pick a player/dummy. 4) Press Swap With Selected. By default you switch places; enable Swap bring to me to stay put, or Swap To Area to send the target to the selected area. Attempts are serialized with a slightly longer, ping-aware settle/hold. Wait for the result before retrying."})
-Tabs.Characters:AddToggle("TglTodoSwapEnable", {Title="Enable Todo Swap", Default=false, Callback=function(v)
+Tabs.Characters:AddSection("东堂换位")
+Tabs.Characters:AddParagraph({Title="东堂换位说明", Content="Infinite-range Boogie Woogie swap. 1) Enable Todo Range Swap. 2) If AC is active, press Start Hunt (the same Gojo hunt; press Stop Hunt to cancel). 3) Refresh + pick a player/dummy. 4) Press Swap With Selected. By default you switch places; enable Swap bring to me to stay put, or Swap To Area to send the target to the selected area. Attempts are serialized with a slightly longer, ping-aware settle/hold. Wait for the result before retrying."})
+Tabs.Characters:AddToggle("TglTodoSwapEnable", {Title="启用东堂换位", Default=false, Callback=function(v)
     if v and not St.todoSwapAcBypassed then
         notify("Todo Range Swap", "Complete Start Hunt first to arm the shared AC proof.", 3)
         St.todoSwapEnabled = false
@@ -12768,23 +12676,23 @@ Tabs.Characters:AddToggle("TglTodoSwapEnable", {Title="Enable Todo Swap", Defaul
     end
     St.todoSwapEnabled = v
 end})
-Tabs.Characters:AddButton({Title="Start Hunt", Callback=runHunt})
-Tabs.Characters:AddButton({Title="Stop Hunt", Callback=stopHunt})
-local DpTodoSwap = Tabs.Characters:AddDropdown("DpTodoSwapTarget", {Title="Swap Target (players + dummies)", Values={"(press Refresh)"}, Default=1, Callback=function(v) St.todoSwapSelected = v end})
-Tabs.Characters:AddButton({Title="Refresh Swap Targets", Callback=function()
+Tabs.Characters:AddButton({Title="开始狩猎", Callback=runHunt})
+Tabs.Characters:AddButton({Title="停止狩猎", Callback=stopHunt})
+local DpTodoSwap = Tabs.Characters:AddDropdown("DpTodoSwapTarget", {Title="换位目标（玩家+假人）", Values={"(press Refresh)"}, Default=1, Callback=function(v) St.todoSwapSelected = v end})
+Tabs.Characters:AddButton({Title="刷新换位目标", Callback=function()
     local names = {}
     if _G.NH_todoSwapTargets then for _, t in ipairs(_G.NH_todoSwapTargets()) do table.insert(names, t.name) end end
     if #names == 0 then names = {"(none found)"} end
     DpTodoSwap:SetValues(names)
     notify("Todo Range Swap", "Found " .. #names .. " targets.", 2)
 end})
-Tabs.Characters:AddToggle("TglTodoSwapReturn", {Title="Swap bring to me", Default=false, Callback=function(v) St.todoSwapReturn = v end})
-Tabs.Characters:AddButton({Title="Swap With Selected", Callback=function()
+Tabs.Characters:AddToggle("TglTodoSwapReturn", {Title="把目标换到我这里", Default=false, Callback=function(v) St.todoSwapReturn = v end})
+Tabs.Characters:AddButton({Title="与所选换位", Callback=function()
     local sel = (Fluent.Options.DpTodoSwapTarget and Fluent.Options.DpTodoSwapTarget.Value) or St.todoSwapSelected
     if _G.NH_todoSwapExecute then _G.NH_todoSwapExecute(sel) end
 end})
-Tabs.Characters:AddDropdown("DpTodoSwapArea", {Title="Swap Area (for Swap To Area)", Values={"Restaurant", "Sewers", "Twin Towers"}, Default=1, Callback=function(v) St.todoSwapArea = v end})
-Tabs.Characters:AddToggle("TglTodoSwapArea", {Title="Swap To Area (send target to spot above)", Default=false, Callback=function(v) St.todoSwapAreaEnabled = v end})
+Tabs.Characters:AddDropdown("DpTodoSwapArea", {Title="换位区域（用于换到区域）", Values={"Restaurant", "Sewers", "Twin Towers"}, Default=1, Callback=function(v) St.todoSwapArea = v end})
+Tabs.Characters:AddToggle("TglTodoSwapArea", {Title="换到区域（把目标送到上方）", Default=false, Callback=function(v) St.todoSwapAreaEnabled = v end})
 
 -- ================================================================
 -- NH ANTI-CC v2.3.0 HUB BACKEND (MOVE-SAFE JUMP FIX)
@@ -13327,14 +13235,14 @@ do
         ENV.NH_AntiCC_Test = M
         _G.NH_ANTI_CC = M
         _G.NH_AntiCC_Test = M
-        print("[NH ANTI-CC] v2.3.0 move-safe backend ready (toggle is off)")
+        
     end, function(err)
-        warn("[NH HUB] Anti-CC v2.3.0 backend failed: " .. tostring(err))
+        warn("E614")
     end)
 end
 
 -- [EXTRAS]
-Tabs.Extras:AddButton({Title="Hitbox Extender", Callback=function()
+Tabs.Extras:AddButton({Title="碰撞箱扩展", Callback=function()
     if St.hitboxLoaded then return end
     St.hitboxLoaded=true
     task.spawn(function() pcall(function()
@@ -13350,8 +13258,8 @@ Tabs.Extras:AddButton({Title="Hitbox Extender", Callback=function()
 end})
 
 -- ── Instant Respawn ─────────────────────────────────────────
-Tabs.Extras:AddSection("Instant Respawn")
-Tabs.Extras:AddToggle("TglInstantRespawn", {Title="Instant Respawn", Default=false, Callback=function(v)
+Tabs.Extras:AddSection("瞬间重生")
+Tabs.Extras:AddToggle("TglInstantRespawn", {Title="瞬间重生", Default=false, Callback=function(v)
     St.instantRespawnEnabled = v
     _G.NH_Respawn.SetAuto(v)
     if v then
@@ -13360,7 +13268,7 @@ Tabs.Extras:AddToggle("TglInstantRespawn", {Title="Instant Respawn", Default=fal
         notify("Instant Respawn", "Off.", 2)
     end
 end})
-Tabs.Extras:AddButton({Title="Respawn Now", Callback=function()
+Tabs.Extras:AddButton({Title="立即重生", Callback=function()
     task.spawn(function()
         local ok, took = _G.NH_Respawn.Await(6)
         if ok then notify("Instant Respawn", string.format("Respawned in %dms.", math.floor(took * 1000 + 0.5)), 3)
@@ -13368,10 +13276,10 @@ Tabs.Extras:AddButton({Title="Respawn Now", Callback=function()
     end)
 end})
 
-Tabs.Extras:AddSection("Protection")
-Tabs.Extras:AddToggle("TglAntiAFK", {Title="Anti-AFK", Default=false, Callback=function(v) St.antiAfkEnabled = v end})
+Tabs.Extras:AddSection("防护")
+Tabs.Extras:AddToggle("TglAntiAFK", {Title="防挂机", Default=false, Callback=function(v) St.antiAfkEnabled = v end})
 Tabs.Extras:AddToggle("TglNoStun", {
-    Title="No Stun + Knockback",
+    Title="无硬直无击退",
     Default=false,
     Callback=function(v)
         -- One toggle for both: the Anti-CC backend already neutralises knockback
@@ -13382,7 +13290,7 @@ Tabs.Extras:AddToggle("TglNoStun", {
         local env = getgenv and getgenv() or _G
         local antiCC = env.NH_ANTI_CC or _G.NH_ANTI_CC
         if type(antiCC) ~= "table" then
-            warn("[NH HUB] Anti-CC v2.3.0 backend is unavailable.")
+            warn("E614")
             notify("No Stun + Knockback", "Anti-CC backend failed to load.", 4)
             return
         end
@@ -13390,16 +13298,16 @@ Tabs.Extras:AddToggle("TglNoStun", {
             if v then antiCC.Start() else antiCC.Stop() end
         end)
         if not ok then
-            warn("[NH HUB] No Stun toggle failed: " .. tostring(err))
+            warn("E614")
             notify("No Stun + Knockback", "Toggle failed; check executor console.", 4)
         end
     end
 })
-Tabs.Extras:AddToggle("TglInvisNoclip", {Title="Invisibility", Default=false, Callback=function(v) St.invisActive = v if v then setupInvisForChar(LocalPlayer.Character) startNoclip() else cleanupInvis(LocalPlayer.Character) if Cn.noclipConn and not (Fluent.Options.TglNoclip and Fluent.Options.TglNoclip.Value) then Cn.noclipConn:Disconnect(); Cn.noclipConn = nil end end end})
+Tabs.Extras:AddToggle("TglInvisNoclip", {Title="隐身", Default=false, Callback=function(v) St.invisActive = v if v then setupInvisForChar(LocalPlayer.Character) startNoclip() else cleanupInvis(LocalPlayer.Character) if Cn.noclipConn and not (Fluent.Options.TglNoclip and Fluent.Options.TglNoclip.Value) then Cn.noclipConn:Disconnect(); Cn.noclipConn = nil end end end})
 St.ToggleKeybinds.Add(Tabs.Extras, "KbInvis", "Invisibility Keybind:",
     "invisKey", "TglInvisNoclip", "I")
-Tabs.Extras:AddToggle("TglShrink", {Title="Shrink Hitbox", Default=false, Callback=function(v) if v then setupShrinkForChar(LocalPlayer.Character) end end})
-Tabs.Extras:AddButton({Title="Invisible Block Script", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/NotEnoughJack/LuaFluentDependancies/refs/heads/main/InvisibleBlock.lua"))() end) end})
+Tabs.Extras:AddToggle("TglShrink", {Title="缩小碰撞箱", Default=false, Callback=function(v) if v then setupShrinkForChar(LocalPlayer.Character) end end})
+Tabs.Extras:AddButton({Title="隐身格挡脚本", Callback=function() pcall(function() loadstring(game:HttpGet("https://raw.githubusercontent.com/NotEnoughJack/LuaFluentDependancies/refs/heads/main/InvisibleBlock.lua"))() end) end})
 -- TWO independent switches over ONE viewer, both OFF by default:
 --   Cooldown Viewer      -> full card (move rows + ult bar + evade bar)
 --   Evade Bar Only       -> nothing but the evade strip
@@ -13420,15 +13328,15 @@ _G.NH_cdvSync = function()
     -- so this is fine to call on every flip of either switch.
     if St.cdViewerFull or St.cdViewerEvadeOnly then CDV.start() else CDV.stop() end
 end
-Tabs.Extras:AddToggle("TglCDViewer", {Title="Cooldown Viewer", Default=false, Callback=function(v)
+Tabs.Extras:AddToggle("TglCDViewer", {Title="冷却查看", Default=false, Callback=function(v)
     St.cdViewerFull = v and true or false
     _G.NH_cdvSync()
 end})
-Tabs.Extras:AddToggle("TglEvadeOnly", {Title="Evade Bar Only", Default=false, Callback=function(v)
+Tabs.Extras:AddToggle("TglEvadeOnly", {Title="仅闪避条", Default=false, Callback=function(v)
     St.cdViewerEvadeOnly = v and true or false
     _G.NH_cdvSync()
 end})
-Tabs.Extras:AddButton({Title="Unlock Emotes", Callback=function()
+Tabs.Extras:AddButton({Title="解锁动作", Callback=function()
     pcall(function()
         -- Emote slot visibility, updated for the new emote GUI layout.
         -- Client-side GUI only: does NOT grant server-side ownership or save unlocks.
@@ -13453,8 +13361,7 @@ Tabs.Extras:AddButton({Title="Unlock Emotes", Callback=function()
             for _, name in ipairs(path) do
                 cur = cur:WaitForChild(name, TIMEOUT)
                 if not cur then
-                    warn(("[emote unlock] missing '%s' (full path: %s) - the GUI was probably changed again"):format(
-                        name, table.concat(path, ".")))
+                    warn("E614")
                     return nil
                 end
             end
@@ -13504,10 +13411,10 @@ Tabs.Extras:AddButton({Title="Unlock Emotes", Callback=function()
     end)
 end})
 local eNames = {} for _, e in ipairs(EMOTE_LIST) do table.insert(eNames, e.name) end
-Tabs.Extras:AddDropdown("DpEmotes", {Title="Select Emote", Values=eNames, Default=1, Callback=function(v) for i, e in ipairs(EMOTE_LIST) do if e.name == v then emoteSelectedIndex = i break end end end})
-Tabs.Extras:AddButton({Title="Fire Emote", Callback=fireSelectedEmote})
-Tabs.Extras:AddButton({Title="Yonk Toggle", Callback=yonkToggle})
-Tabs.Extras:AddSlider("SldYonkSpd", {Title="Yonk Speed", Min=0.1, Max=2, Default=1, Rounding=2, Callback=function(v) St.yonkSpeed = v if St.yonkAnimTrack then St.yonkAnimTrack:AdjustSpeed(v) end end})
+Tabs.Extras:AddDropdown("DpEmotes", {Title="选择动作", Values=eNames, Default=1, Callback=function(v) for i, e in ipairs(EMOTE_LIST) do if e.name == v then emoteSelectedIndex = i break end end end})
+Tabs.Extras:AddButton({Title="播放动作", Callback=fireSelectedEmote})
+Tabs.Extras:AddButton({Title="偷取开关", Callback=yonkToggle})
+Tabs.Extras:AddSlider("SldYonkSpd", {Title="偷取速度", Min=0.1, Max=2, Default=1, Rounding=2, Callback=function(v) St.yonkSpeed = v if St.yonkAnimTrack then St.yonkAnimTrack:AdjustSpeed(v) end end})
 
 -- The Record Jumps switch lives at the BOTTOM OF THE COMBOS TAB, right under
 -- the recorder's own controls, so it is one tap away while you are recording
@@ -13606,9 +13513,9 @@ do
         refreshItemEsp()
     end)
 end
-Tabs.Items:AddToggle("TglItemESP", {Title="Item ESP", Default=false, Callback=function(v) St.itemEspEnabled = v if not v then _G.NH_clearItemEsp() end end})
-Tabs.Items:AddSection("Items On Map")
-local DpItems = Tabs.Items:AddDropdown("DpMainItems", {Title="Select Item", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
+Tabs.Items:AddToggle("TglItemESP", {Title="物品透视", Default=false, Callback=function(v) St.itemEspEnabled = v if not v then _G.NH_clearItemEsp() end end})
+Tabs.Items:AddSection("地图物品")
+local DpItems = Tabs.Items:AddDropdown("DpMainItems", {Title="选择物品", Values={"(press Refresh)"}, Default=1, Callback=function(v) end})
 _G.NH_refreshItemList = function(quiet)
     local IG = _G.NH_ItemGrabber
     if not IG then
@@ -13636,7 +13543,7 @@ local function nhSelectedItem()
     end
     return part, sel
 end
-Tabs.Items:AddButton({Title="Grab Selected Item", Callback=function()
+Tabs.Items:AddButton({Title="抓取所选物品", Callback=function()
     local part, label = nhSelectedItem()
     if not part then return end
     task.spawn(function()
@@ -13646,13 +13553,13 @@ Tabs.Items:AddButton({Title="Grab Selected Item", Callback=function()
         _G.NH_refreshItemList(true)
     end)
 end})
-Tabs.Items:AddButton({Title="Drop Item", Callback=function()
+Tabs.Items:AddButton({Title="丢弃物品", Callback=function()
     local IG = _G.NH_ItemGrabber
     if not IG then notify("Items", "Item grabber module failed to load.", 3) return end
     if IG.drop() then notify("Items", "Dropped held item.", 2) else notify("Items", "Drop failed.", 3) end
 end})
-Tabs.Items:AddButton({Title="Refresh Items", Callback=function() _G.NH_refreshItemList(false) end})
-Tabs.Items:AddButton({Title="Grab Nearest Item", Callback=function()
+Tabs.Items:AddButton({Title="刷新物品", Callback=function() _G.NH_refreshItemList(false) end})
+Tabs.Items:AddButton({Title="抓取最近物品", Callback=function()
     local IG = _G.NH_ItemGrabber
     if not IG then notify("Items", "Item grabber module failed to load.", 3) return end
     task.spawn(function()
@@ -13664,7 +13571,7 @@ Tabs.Items:AddButton({Title="Grab Nearest Item", Callback=function()
         _G.NH_refreshItemList(true)
     end)
 end})
-Tabs.Items:AddButton({Title="Grab All Items", Callback=function()
+Tabs.Items:AddButton({Title="抓取全部物品", Callback=function()
     local IG = _G.NH_ItemGrabber
     if not IG then notify("Items", "Item grabber module failed to load.", 3) return end
     task.spawn(function()
@@ -13674,13 +13581,13 @@ Tabs.Items:AddButton({Title="Grab All Items", Callback=function()
         _G.NH_refreshItemList(true)
     end)
 end})
-Tabs.Items:AddToggle("TglAutoGrabItems", {Title="Auto Grab Items (loop)", Default=false, Callback=function(v)
+Tabs.Items:AddToggle("TglAutoGrabItems", {Title="自动抓取物品（循环）", Default=false, Callback=function(v)
     local IG = _G.NH_ItemGrabber
     if not IG then notify("Items", "Item grabber module failed to load.", 3) return end
     IG.autoGrab = v
     notify("Items", v and "Auto grab ON - sweeping items as they spawn." or "Auto grab OFF.", 2)
 end})
-Tabs.Items:AddToggle("TglItemAutoList", {Title="Auto Refresh List", Default=false, Callback=function(v)
+Tabs.Items:AddToggle("TglItemAutoList", {Title="自动刷新列表", Default=false, Callback=function(v)
     _G.NH_itemAutoList = v
     if v and not _G.NH_itemAutoListLoop then
         _G.NH_itemAutoListLoop = true
@@ -13708,16 +13615,16 @@ if not mobile then
     St.ToggleKeybinds.Add(Tabs.Keybinds, "KbAutoBlock", "Auto Block Key",
         "autoBlockKey", "TglAutoBlockC", "K")
     -- PATCH P14: St.KeyBinds.Add applies the key on config load too (not only on pick).
-    St.KeyBinds.Add(Tabs.Keybinds, "KbSweep", {Title="Sweep Key", Name="Sweep", Default="E", Apply=function(code) Keys.sweepKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbHunt", {Title="Hunt Key", Name="Hunt", Default="Y", Apply=function(code) Keys.huntKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbBF", {Title="BF Dash Key", Name="BF Dash", Default="G", Apply=function(code) Keys.bfKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbFly", {Title="Fly Key", Name="Fly", Default="X", Apply=function(code) Keys.flyKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbLock", {Title="Lock-On Key", Name="Lock-On", Default="C", Apply=function(code) Keys.lockOnKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbYonk", {Title="Yonk Key", Name="Yonk", Default="J", Apply=function(code) Keys.yonkKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbEmote", {Title="Auto Emote Key", Name="Auto Emote", Default="Z", Apply=function(code) Keys.emoteKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbHarutaBs", {Title="Haruta Backstab Key (default: 2)", Name="Haruta Backstab", Default="Two", Apply=function(code) Keys.harutaBsKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbBFChain", {Title="BF Chain Key (default: 3)", Name="BF Chain", Default="Three", Apply=function(code) Keys.bfChainKey = code end})
-    St.KeyBinds.Add(Tabs.Keybinds, "KbVoid", {Title="Void Key", Name="Void / Reset", Default="V", Apply=function(code) Keys.voidKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbSweep", {Title="扫荡键", Name="Sweep", Default="E", Apply=function(code) Keys.sweepKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbHunt", {Title="狩猎键", Name="Hunt", Default="Y", Apply=function(code) Keys.huntKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbBF", {Title="黑闪冲刺键", Name="BF Dash", Default="G", Apply=function(code) Keys.bfKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbFly", {Title="飞行键", Name="Fly", Default="X", Apply=function(code) Keys.flyKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbLock", {Title="锁定键", Name="Lock-On", Default="C", Apply=function(code) Keys.lockOnKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbYonk", {Title="偷取键", Name="Yonk", Default="J", Apply=function(code) Keys.yonkKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbEmote", {Title="自动动作键", Name="Auto Emote", Default="Z", Apply=function(code) Keys.emoteKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbHarutaBs", {Title="春太背刺键（默认 2）", Name="Haruta Backstab", Default="Two", Apply=function(code) Keys.harutaBsKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbBFChain", {Title="黑闪连段键（默认 3）", Name="BF Chain", Default="Three", Apply=function(code) Keys.bfChainKey = code end})
+    St.KeyBinds.Add(Tabs.Keybinds, "KbVoid", {Title="虚空键", Name="Void / Reset", Default="V", Apply=function(code) Keys.voidKey = code end})
 else
     -- MOBILE: phones can't bind keyboard keys, so instead each box below drops a draggable
     -- on-screen button for that function. Matching feature toggles now surface their
@@ -13743,13 +13650,13 @@ else
     -- COMBO RECORDER. REC replaces the PC record key (F8) and AUTO COMBO replaces
     -- the play key (F9). Both are tap-on / tap-again-off, exactly like the keys.
     Tabs.Keybinds:AddToggle("MbCRRec", {
-        Title = "Show Combo Record Button (PC: F8)",
+        Title="显示连招录制按钮（PC：F8）",
         Description = "Tap to start recording a combo, tap again to stop and save it.",
         Default = false,
         Callback = function(v) _G.NH_btnManual["CRRecBtn"] = v and true or false end,
     })
     Tabs.Keybinds:AddToggle("MbCRPlay", {
-        Title = "Show Auto Combo Button (PC: F9)",
+        Title="显示自动连招按钮（PC：F9）",
         Description = "Tap to run the recorded combo on your target, tap again to cancel it mid-combo.",
         Default = false,
         Callback = function(v) _G.NH_btnManual["CRPlayBtn"] = v and true or false end,
@@ -13765,25 +13672,25 @@ else
     mbBtn("MbSoloBlock", "Show Solo Block Button", "SoloBlockBtn")
     -- Auto Backdash's mobile button control lives with the feature in Combat.
     -- Show Emote Button moved here from Settings -- uses the canonical emote overlay toggle.
-    Tabs.Keybinds:AddToggle("TglMainOverlay", {Title="Show Emote Button", Default=false, Callback=function(v) if _G.ToggleMainOverlay then _G.ToggleMainOverlay(v) end end})
+    Tabs.Keybinds:AddToggle("TglMainOverlay", {Title="显示动作按钮", Default=false, Callback=function(v) if _G.ToggleMainOverlay then _G.ToggleMainOverlay(v) end end})
 end
 
 -- [SETTINGS]
-Tabs.Settings:AddSection("Float Overlays & Visuals")
+Tabs.Settings:AddSection("悬浮层与视觉")
 if mobile then
-    Tabs.Settings:AddSlider("SldBtnSize", {Title="Mobile Button Size", Min=0.6, Max=1.8, Default=1, Rounding=2, Callback=function(v) if _G.NH_ApplyBtnScale then _G.NH_ApplyBtnScale(v) end end})
-    Tabs.Settings:AddToggle("TglLockBtns", {Title="Lock Buttons In Place (no dragging)", Default=false, Callback=function(v) _G.NH_btnLocked = v end})
+    Tabs.Settings:AddSlider("SldBtnSize", {Title="移动端按钮大小", Min=0.6, Max=1.8, Default=1, Rounding=2, Callback=function(v) if _G.NH_ApplyBtnScale then _G.NH_ApplyBtnScale(v) end end})
+    Tabs.Settings:AddToggle("TglLockBtns", {Title="锁定按钮位置（不可拖动）", Default=false, Callback=function(v) _G.NH_btnLocked = v end})
 end
 
-Tabs.Settings:AddSection("Target Offsets")
-Tabs.Settings:AddDropdown("DpSweepMode", {Title="Sweep Mode", Values={"normal", "faster"}, Default="normal", Callback=function(v) Cfg.sweepMode = v end})
-Tabs.Settings:AddDropdown("DpTPPriority", {Title="TP Priority", Values={"normal", "hppct"}, Default="normal", Callback=function(v) Cfg.tpPriority = v end})
-Tabs.Settings:AddDropdown("DpTPMode", {Title="TP Mode", Values={"Under", "Behind"}, Default="Under", Callback=function(v) Cfg.tpMode = string.lower(v) end})
-Tabs.Settings:AddDropdown("DpTPMethod", {Title="TP Method", Values={"Default", "Smart"}, Default="Default", Callback=function(v) Cfg.tpMethod = string.lower(v) end})
-Tabs.Settings:AddSlider("SldOffsetX", {Title="Offset X", Min=-10, Max=10, Default=0, Rounding=1, Callback=function(v) Cfg.offsetX = v end})
-Tabs.Settings:AddSlider("SldOffsetY", {Title="Offset Y", Min=-10, Max=10, Default=0, Rounding=1, Callback=function(v) Cfg.offsetY = v end})
-Tabs.Settings:AddSlider("SldOffsetZ", {Title="Offset Z", Min=0, Max=15, Default=2, Rounding=1, Callback=function(v) Cfg.offsetZ = v end})
-Tabs.Settings:AddSlider("SldFallen", {Title="Fallen Height (0=NaN)", Min=-500, Max=500, Default=-1000, Rounding=0, Callback=function(v) Cfg.fallenHeight = (v==0) and (0/0) or v end})
+Tabs.Settings:AddSection("目标偏移")
+Tabs.Settings:AddDropdown("DpSweepMode", {Title="扫荡模式", Values={"normal", "faster"}, Default="normal", Callback=function(v) Cfg.sweepMode = v end})
+Tabs.Settings:AddDropdown("DpTPPriority", {Title="传送优先级", Values={"normal", "hppct"}, Default="normal", Callback=function(v) Cfg.tpPriority = v end})
+Tabs.Settings:AddDropdown("DpTPMode", {Title="传送模式", Values={"Under", "Behind"}, Default="Under", Callback=function(v) Cfg.tpMode = string.lower(v) end})
+Tabs.Settings:AddDropdown("DpTPMethod", {Title="传送方式", Values={"Default", "Smart"}, Default="Default", Callback=function(v) Cfg.tpMethod = string.lower(v) end})
+Tabs.Settings:AddSlider("SldOffsetX", {Title="偏移 X", Min=-10, Max=10, Default=0, Rounding=1, Callback=function(v) Cfg.offsetX = v end})
+Tabs.Settings:AddSlider("SldOffsetY", {Title="偏移 Y", Min=-10, Max=10, Default=0, Rounding=1, Callback=function(v) Cfg.offsetY = v end})
+Tabs.Settings:AddSlider("SldOffsetZ", {Title="偏移 Z", Min=0, Max=15, Default=2, Rounding=1, Callback=function(v) Cfg.offsetZ = v end})
+Tabs.Settings:AddSlider("SldFallen", {Title="倒地高度（0=NaN）", Min=-500, Max=500, Default=-1000, Rounding=0, Callback=function(v) Cfg.fallenHeight = (v==0) and (0/0) or v end})
 
 -- ============================================================
 -- NH COMBO RECORDER   (integrated module)
@@ -13939,7 +13846,7 @@ function K.push(fmt, ...)
     local ok, line = pcall(string.format, fmt, ...)
     if not ok then line = tostring(fmt) end
     RSt.lastLine = line
-    print("[Combo Recorder] " .. line)
+    
     return line
 end
 function K.safe(fn, ...)
@@ -15848,24 +15755,24 @@ function UI.build()
     local tab = Tabs.Combos
     if not tab then return end
 
-    UI.status = tab:AddParagraph({ Title = "Status", Content = "Loading..." })
+    UI.status = tab:AddParagraph({ Title="状态", Content = "Loading..." })
 
     -- Two plain buttons, one directly under the other. Nothing here changes
     -- state unless you press it.
     tab:AddButton({
-        Title = "Start Recording",
+        Title="开始录制",
         Description = "Begins capturing into the slot below.",
         Callback = function() K.safe(R.record) end,
     })
     tab:AddButton({
-        Title = "Stop Recording",
+        Title="停止录制",
         Description = "Ends the recording and saves it to the slot.",
         Callback = function() K.safe(R.stop) end,
     })
 
-    tab:AddSection("Your Combos")
+    tab:AddSection("你的连招")
     UI.slotDrop = tab:AddDropdown("CRSlot", {
-        Title = "Combo Slot",
+        Title="连招槽位",
         Description = "Recording saves here, and the play key plays this one.",
         Values = UI.slotValues(),
         Default = 1,
@@ -15878,7 +15785,7 @@ function UI.build()
         end,
     })
     tab:AddInput("CRName", {
-        Title = "Name This Combo",
+        Title="为连招命名",
         Default = "",
         Placeholder = "type a name, press enter",
         Numeric = false,
@@ -15888,45 +15795,45 @@ function UI.build()
         end,
     })
     tab:AddButton({
-        Title = "Play / Stop Combo",
+        Title="播放/停止连招",
         Description = "Runs on whoever you are locked onto, else the closest person. Press again to stop.",
         Callback = function() K.safe(R.playToggle, RSt.slot) end,
     })
     tab:AddButton({
-        Title = "Delete This Combo",
+        Title="删除该连招",
         Callback = function() K.safe(R.delete, RSt.slot) end,
     })
 
     -- Keyboard-only pickers: phones use the REC / AUTO COMBO / STOP buttons instead
     -- (Keybinds tab), and a touch tap leaves Fluent's picker stuck on "...".
     if not mobile then
-        tab:AddSection("Keys")
+        tab:AddSection("按键")
         St.KeyBinds.Add(tab, "CRKeyRecord", {
-            Title = "Record Key", Name = "Combo Record", Default = "F8",
+            Title="录制键", Name = "Combo Record", Default = "F8",
             Apply = function(code) RKeys.record = code; pcall(UI.refresh) end,
         })
         St.KeyBinds.Add(tab, "CRKeyPlay", {
-            Title = "Play / Stop Key", Name = "Combo Play / Stop", Default = "F9",
+            Title="播放停止键", Name = "Combo Play / Stop", Default = "F9",
             Apply = function(code) RKeys.play = code; pcall(UI.refresh) end,
         })
         St.KeyBinds.Add(tab, "CRKeyStop", {
-            Title = "Panic Stop Key", Name = "Combo Panic Stop", Default = "Backspace",
+            Title="紧急停止键", Name = "Combo Panic Stop", Default = "Backspace",
             Apply = function(code) RKeys.stop = code; pcall(UI.refresh) end,
         })
     end
 
-    tab:AddSection("Speed")
+    tab:AddSection("速度")
     tab:AddSlider("CRSpeed", {
-        Title = "Playback Speed",
+        Title="播放速度",
         Min = 0.5, Max = 2, Default = 1, Rounding = 2,
         Callback = function(v) RCfg.Speed = math.clamp(tonumber(v) or 1, 0.25, 3) end,
     })
 
     -- EXTRA SETTINGS -- last section on the tab, so the jump switch is right
     -- there beside Start/Stop instead of buried in another tab.
-    tab:AddSection("Extras")
+    tab:AddSection("其他")
     tab:AddToggle("CRRecordJumps", {
-        Title = "Record Jumps",
+        Title="录制跳跃",
         Description = "On: your jumps are recorded and replayed, and air moves fire in the air. Off: jumps are ignored on both sides.",
         Default = true,
         Callback = function(v)
@@ -15938,31 +15845,31 @@ function UI.build()
         end,
     })
     tab:AddToggle("CRRunToEnemy", {
-        Title = "Run To Enemy",
+        Title="冲向敌人",
         Description = "On: if a move cannot reach, close the distance and carry on. Off: that move is skipped instead.",
         Default = true,
         Callback = function(v) RCfg.RunToEnemy = v and true or false end,
     })
     tab:AddToggle("CRAbortIfFar", {
-        Title = "Abort If Nobody Near",
+        Title="无人时中止",
         Description = "Ends the combo instead of swinging at empty air when there is no one to hit.",
         Default = true,
         Callback = function(v) RCfg.AbortIfFar = v and true or false end,
     })
     tab:AddToggle("CRDashAim", {
-        Title = "Aim Dashes At Enemy",
+        Title="冲刺对准敌人",
         Description = "Re-points every recorded dash at whoever you are fighting now, instead of where they used to be.",
         Default = true,
         Callback = function(v) RCfg.DashAim = v and true or false end,
     })
     tab:AddToggle("CRDashBehind", {
-        Title = "Dash Behind On Turn",
+        Title="转向时绕到背后",
         Description = "If you curved round them while recording, the replay runs in and turns onto their back mid-dash.",
         Default = true,
         Callback = function(v) RCfg.DashBehind = v and true or false end,
     })
     tab:AddToggle("CRDashSide", {
-        Title = "Keep Side Dash Angle",
+        Title="保持侧闪角度",
         Description = "Side and back dashes replay at the angle you recorded them, relative to the enemy. Off: every dash goes straight at them.",
         Default = true,
         Callback = function(v) RCfg.DashSide = v and true or false end,
@@ -16068,50 +15975,38 @@ _G.NH_ComboRec = {
     end,
 }
 
-print(string.format("[NH Combo Recorder] ready  |  record %s  |  play %s  |  stop %s",
-    keyName(RKeys.record), keyName(RKeys.play), keyName(RKeys.stop)))
-print("[NH Combo Recorder] locked on -> that person only. Not locked on -> closest person.")
+
+
 
 end)
 
 if not okCR then
-    warn("[NH Combo Recorder] load failed: " .. tostring(errCR))
+    warn("E614")
     pcall(function()
-        Fluent:Notify({ Title = "Combo Recorder", Content = "Module failed to load, check console.", Duration = 6 })
+        Fluent:Notify({ Title="连招录制", Content = "Module failed to load, check console.", Duration = 6 })
     end)
 end
 end
 
-SaveManager:SetLibrary(Fluent)
-InterfaceManager:SetLibrary(Fluent)
-SaveManager:IgnoreThemeSettings()
--- Mobile visibility options are intentionally NOT ignored: their clean defaults are
--- false, while an autoload config can restore the user's chosen visible buttons.
--- Linked rows save only the canonical inline IDs; mirrors are updated automatically.
-SaveManager:SetIgnoreIndexes({"ATAura","ATLock","ATAutoUltimate","ATAutoSoda","ATInvisibility","ATBindPlayer","ATTarget","ATCombo","ATProtectPlayer","AFRunning","AFTarget","KbInvisMaster","KbRotateLockOnMaster"})
-InterfaceManager:SetFolder("NiggaHub")
-SaveManager:SetFolder("NiggaHub/cfg")
-InterfaceManager:BuildInterfaceSection(Tabs.Settings) 
-SaveManager:BuildConfigSection(Tabs.Settings)
 
 local searchBuildOk, searchBuildResult = pcall(function()
     return _G.NH_FeatureSearch.BuildUI()
 end)
 if not searchBuildOk then
-    warn("[NH Search] Build failed: " .. tostring(searchBuildResult))
+    warn("E614")
 elseif searchBuildResult ~= true then
-    warn("[NH Search] Could not attach the global search bar to Fluent's window.")
+    warn("E614")
 end
 Window:SelectTab(1)
-local autoloadOk,autoloadError=pcall(function() SaveManager:LoadAutoloadConfig() end)
+local autoloadOk, autoloadError = true, nil
 -- SaveManager restores each option in its own task; once they've run, re-apply every
 -- bind from what its row shows so the live key can never lag behind the label.
 pcall(function() St.KeyBinds.TrackLabel("MenuKeybind", Fluent.Options.MenuKeybind) end)
 pcall(function() St.KeyBinds.Refresh() end)
 task.defer(function() pcall(function() St.KeyBinds.Refresh() end) end)
 getgenv().NH_HubBooting = false
-if not autoloadOk then warn("[NH Config] "..tostring(autoloadError)) end
-Fluent:Notify({Title="Nigga Hub", Content="Ultimate Edition Loaded.", Duration=5})
+if not autoloadOk then warn("E614") end
+Fluent:Notify({Title="脚本中枢", Content="Ultimate Edition Loaded.", Duration=5})
 
 -- ============================================================
 -- FLOAT BUTTONS & INPUT HANDLING
@@ -16977,44 +16872,17 @@ UserInputService.InputEnded:Connect(function(inp)
     elseif k==Enum.KeyCode.LeftShift then flyKeys.Boost=false end
 end)
 
-    pcall(function() _G.NH_Window = Window end)
 end
 
-local jjsOk = pcall(jjsRun)
+local jjsOk = pcall(runJjs)
 if not jjsOk then
-	warn(jjs.failed and "E605" or "E604")
+	warn("E615")
 end
 
 pcall(function()
-	VUniverse.Jjs = { Ready = jjsOk == true, Vendor = not jjs.failed }
+	VUniverse.Jjs = { Ready = jjsOk == true, Controls = #(function()
+		local list = {}
+		for name in pairs(Options) do list[#list + 1] = name end
+		return list
+	end)() }
 end)
-
-do
-	pcall(function()
-		local tab = UI.Window:MakeTab({ Name = "咒术", Icon = "zap" })
-		if not tab then return end
-		tab:AddParagraph({
-			Title = "脚本状态",
-			Content = jjsOk
-				and "脚本已加载，使用它自带的窗口（Ctrl 显示或隐藏）。"
-				or "脚本加载失败，故障码见下方说明。",
-		})
-		if not jjsOk then
-			tab:AddParagraph({
-				Title = "故障码",
-				Content = jjs.failed and "E605 依赖下载失败（Fluent / SaveManager / InterfaceManager）"
-					or "E604 脚本运行时报错",
-			})
-		end
-		tab:AddButton({
-			Name = "显示 / 隐藏脚本窗口",
-			Callback = function()
-				pcall(function()
-					local window = rawget(_G, "NH_Window")
-					local root = window and window.Root
-					if root then root.Visible = not root.Visible end
-				end)
-			end,
-		})
-	end)
-end
