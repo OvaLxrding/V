@@ -15,6 +15,11 @@ if type(VUniverse) ~= "table" then
 	return false
 end
 
+-- Upstream guards itself with this flag; clear it so a reload rebuilds the menu.
+if type(getgenv) == "function" then
+	pcall(function() getgenv().GojoDomainLoaded = nil end)
+end
+
 local HubWindow = UI.Window
 local HubLib = UI.VLib
 
@@ -15989,14 +15994,6 @@ end
 end
 
 
-local searchBuildOk, searchBuildResult = pcall(function()
-    return _G.NH_FeatureSearch.BuildUI()
-end)
-if not searchBuildOk then
-    warn("E614")
-elseif searchBuildResult ~= true then
-    warn("E614")
-end
 Window:SelectTab(1)
 local autoloadOk, autoloadError = true, nil
 -- SaveManager restores each option in its own task; once they've run, re-apply every
@@ -16880,9 +16877,9 @@ if not jjsOk then
 end
 
 pcall(function()
-	VUniverse.Jjs = { Ready = jjsOk == true, Controls = #(function()
-		local list = {}
-		for name in pairs(Options) do list[#list + 1] = name end
-		return list
-	end)() }
+	local total = 0
+	for _ in pairs(Options) do total = total + 1 end
+	VUniverse.Jjs = { Ready = jjsOk == true, Controls = total }
 end)
+
+return true
