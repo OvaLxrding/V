@@ -20,6 +20,8 @@ if type(getgenv) == "function" then
 	pcall(function() getgenv().GojoDomainLoaded = nil end)
 end
 
+local VReport = (type(getgenv) == "function" and getgenv().VReport) or function() end
+
 local HubWindow = UI.Window
 local HubLib = UI.VLib
 
@@ -85,7 +87,7 @@ local function buildToggle(container, id, cfg)
 		Default = entry.Value,
 		Callback = function(value)
 			entry.Value = value == true
-			fire(cfg.Callback, value)
+			fire(cfg.Title or id, cfg.Callback, value)
 		end,
 	})
 	return entry
@@ -107,7 +109,7 @@ local function buildSlider(container, id, cfg)
 		Increment = step,
 		Callback = function(value)
 			entry.Value = value
-			fire(cfg.Callback, value)
+			fire(cfg.Title or id, cfg.Callback, value)
 		end,
 	})
 	return entry
@@ -136,7 +138,7 @@ local function buildDropdown(container, id, cfg)
 		Default = default,
 		Callback = function(value)
 			entry.Value = value
-			fire(cfg.Callback, value)
+			fire(cfg.Title or id, cfg.Callback, value)
 		end,
 	})
 	return entry
@@ -174,7 +176,7 @@ local function buildInput(container, id, cfg)
 		Placeholder = tostring(cfg.Placeholder or ""),
 		Callback = function(text)
 			entry.Value = text
-			fire(cfg.Callback, text)
+			fire(cfg.Title or id, cfg.Callback, text)
 		end,
 	})
 	return entry
@@ -191,11 +193,11 @@ local function buildKeybind(container, id, cfg)
 			if entry.Element and type(entry.Element.Get) == "function" then
 				entry.Value = entry.Element:Get()
 			end
-			fire(cfg.Callback, pressed)
+			fire(cfg.Title or id, cfg.Callback, pressed)
 		end,
 		OnChanged = function(name)
 			entry.Value = name
-			fire(cfg.ChangedCallback, name)
+			fire(cfg.Title or id, cfg.ChangedCallback, name)
 		end,
 	})
 	return entry
@@ -2983,7 +2985,7 @@ do
         end
         local okHook = pcall(function() oldDS = hookmetamethod(game, "__namecall", dsHook) end)
         if not okHook then
-            warn("E614")
+            VReport("E614", "[NH] auto-downslam: neither UseSetService nor hookmetamethod is available on this executor")
         end
     end
 end
@@ -6192,7 +6194,7 @@ local function bfFireCharged(effTime, target, route, plan)
         if not ok then
             bfCancel()
             timing.status, timing.error = "sequence_error", tostring(err)
-            warn("E614")
+            VReport("E614", "[BlackFlash P11] input sequence stopped:", err)
             return
         end
         if not bfValid(target, token) then bfCancel(); return end
@@ -7232,7 +7234,7 @@ _G.NH_FeatureSearch = (function()
             if type(tabWidth) == "number" then headerLeft = tabWidth + 26 end
         end
         if type(headerLeft) ~= "number" then
-            warn("E614")
+            VReport("E614", "[NH Search] Could not determine Fluent's header position.")
             return false
         end
 
@@ -7458,7 +7460,7 @@ _G.NH_FeatureSearch = (function()
                     if not (scroller and scroller:IsA("ScrollingFrame")) then return end
                     local elementFrame = findExactFrame(entry, scroller)
                     if not elementFrame then
-                        warn("E614")
+                        VReport("E614", "[NH Search] Could not resolve the exact control row: " .. tostring(entry.title))
                         return
                     end
 
@@ -7499,7 +7501,7 @@ _G.NH_FeatureSearch = (function()
                         pcall(function() stroke:Destroy() end)
                     end)
                 end)
-                if not ok then warn("E614") end
+                if not ok then VReport("E614", "[NH Search] Jump to exact feature failed: " .. tostring(err)) end
             end)
         end
 
@@ -8873,7 +8875,7 @@ log("v" .. M.Version .. " backend ready; animation", state.animationId)
 return M
     end)
     if not okAG then
-        warn("E614")
+        VReport("E614", "[NH HUB] Auto Garuda module failed: " .. tostring(errAG))
     end
 end
 
@@ -10046,13 +10048,13 @@ function CD.start()
 			scanAccum = 0
 			local ok, err = pcall(scan)
 			if not ok then
-				warn("E614")
+				VReport("E614", "[NH CDViewer] scan: " .. tostring(err))
 			end
 		end
 
 		local ok2, err2 = pcall(animate, dt)
 		if not ok2 then
-			warn("E614")
+			VReport("E614", "[NH CDViewer] animate: " .. tostring(err2))
 		end
 	end)
 end
@@ -10163,7 +10165,7 @@ return CD
 
     end)
     if not okCD then
-        warn("E614")
+        VReport("E614", "[NH HUB] Cooldown Viewer module failed: " .. tostring(errCD))
     end
 end
 
@@ -10379,7 +10381,7 @@ do
         IG.refresh()
     end)
     if not okIG then
-        warn("E614")
+        VReport("E614", "[NH HUB] Item Grabber module failed: " .. tostring(errIG))
     end
 end
 
@@ -10793,7 +10795,7 @@ do
                 pcall(rawSetValue, option, key, "Toggle")
             end
             local ok, err = pcall(opts.Apply, entry.code)
-            if not ok then warn("E614") end
+            if not ok then VReport("E614", "[NH Keybinds] " .. tostring(id) .. ": " .. tostring(err)) end
             if fromUser then KB.AfterUserPick(entry.name, raw, entry.code, id) end
         end
         option = container:AddKeybind(id, {
@@ -11781,7 +11783,7 @@ do
             S.suppressUntil = os.clock() + 0.75
             S.source = source or S.source
             if not ok then
-                warn("E614")
+                VReport("E614", "[NH Earthquake] " .. tostring(via))
                 notify("Auto Earthquake", "Release failed; check the developer console.", 4)
             end
             return ok
@@ -13242,7 +13244,7 @@ do
         _G.NH_AntiCC_Test = M
         
     end, function(err)
-        warn("E614")
+        VReport("E614", "[NH HUB] Anti-CC v2.3.0 backend failed: " .. tostring(err))
     end)
 end
 
@@ -13295,7 +13297,7 @@ Tabs.Extras:AddToggle("TglNoStun", {
         local env = getgenv and getgenv() or _G
         local antiCC = env.NH_ANTI_CC or _G.NH_ANTI_CC
         if type(antiCC) ~= "table" then
-            warn("E614")
+            VReport("E614", "[NH HUB] Anti-CC v2.3.0 backend is unavailable.")
             notify("No Stun + Knockback", "Anti-CC backend failed to load.", 4)
             return
         end
@@ -13303,7 +13305,7 @@ Tabs.Extras:AddToggle("TglNoStun", {
             if v then antiCC.Start() else antiCC.Stop() end
         end)
         if not ok then
-            warn("E614")
+            VReport("E614", "[NH HUB] No Stun toggle failed: " .. tostring(err))
             notify("No Stun + Knockback", "Toggle failed; check executor console.", 4)
         end
     end
@@ -13366,7 +13368,8 @@ Tabs.Extras:AddButton({Title="解锁动作", Callback=function()
             for _, name in ipairs(path) do
                 cur = cur:WaitForChild(name, TIMEOUT)
                 if not cur then
-                    warn("E614")
+                    VReport("E614", ("[emote unlock] missing '%s' (full path: %s) - the GUI was probably changed again"):format(
+                        name, table.concat(path, ".")))
                     return nil
                 end
             end
@@ -15986,7 +15989,7 @@ _G.NH_ComboRec = {
 end)
 
 if not okCR then
-    warn("E614")
+    VReport("E614", "[NH Combo Recorder] load failed: " .. tostring(errCR))
     pcall(function()
         Fluent:Notify({ Title="连招录制", Content = "Module failed to load, check console.", Duration = 6 })
     end)
@@ -16002,7 +16005,7 @@ pcall(function() St.KeyBinds.TrackLabel("MenuKeybind", Fluent.Options.MenuKeybin
 pcall(function() St.KeyBinds.Refresh() end)
 task.defer(function() pcall(function() St.KeyBinds.Refresh() end) end)
 getgenv().NH_HubBooting = false
-if not autoloadOk then warn("E614") end
+if not autoloadOk then VReport("E614", "[NH Config] "..tostring(autoloadError)) end
 Fluent:Notify({Title="脚本中枢", Content="Ultimate Edition Loaded.", Duration=5})
 
 -- ============================================================
@@ -16871,9 +16874,9 @@ end)
 
 end
 
-local jjsOk = pcall(runJjs)
+local jjsOk, jjsErr = pcall(runJjs)
 if not jjsOk then
-	warn("E615")
+	VReport("E615", jjsErr)
 end
 
 pcall(function()
